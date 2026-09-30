@@ -5,6 +5,8 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 mod error;
+mod parameter;
+mod placeholders;
 mod postgres;
 mod runtime;
 
@@ -18,9 +20,13 @@ async fn runtime_probe(delay_ms: u64) -> PyResult<u64> {
     runtime::probe(delay_ms).await.map_err(to_python_error)
 }
 
-#[pyfunction]
-async fn execute(database_url: String, sql: String) -> PyResult<postgres::TextRows> {
-    runtime::execute(database_url, sql)
+#[pyfunction(signature = (database_url, sql, params=None))]
+async fn execute(
+    database_url: String,
+    sql: String,
+    params: Option<Vec<parameter::QueryParameter>>,
+) -> PyResult<postgres::TextRows> {
+    runtime::execute(database_url, sql, params.unwrap_or_default())
         .await
         .map_err(to_python_error)
 }

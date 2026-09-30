@@ -3,6 +3,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::error::NativeError;
+use crate::parameter::QueryParameter;
 use crate::postgres::{self, TextRows};
 use tokio::sync::{mpsc, oneshot};
 
@@ -14,6 +15,7 @@ enum Command {
     Execute {
         database_url: String,
         sql: String,
+        params: Vec<QueryParameter>,
         response: oneshot::Sender<Result<TextRows, NativeError>>,
     },
 }
@@ -36,7 +38,11 @@ pub(crate) async fn probe(delay_ms: u64) -> Result<u64, NativeError> {
         .map_err(|_| NativeError::ResponseChannelClosed)
 }
 
-pub(crate) async fn execute(database_url: String, sql: String) -> Result<TextRows, NativeError> {
+pub(crate) async fn execute(
+    database_url: String,
+    sql: String,
+    params: Vec<QueryParameter>,
+) -> Result<TextRows, NativeError> {
     let service = RuntimeService::start();
     let (response_tx, response_rx) = oneshot::channel();
 
@@ -45,6 +51,7 @@ pub(crate) async fn execute(database_url: String, sql: String) -> Result<TextRow
         .send(Command::Execute {
             database_url,
             sql,
+            params,
             response: response_tx,
         })
         .await
@@ -104,9 +111,10 @@ async fn handle_command(command: Command) {
         Command::Execute {
             database_url,
             sql,
+            params,
             response,
         } => {
-            let result = postgres::execute(&database_url, &sql).await;
+            let result = postgres::execute(&database_url, &sql, &params).await;
             // Cancellation may drop the receiver before this task completes.
             let _ = response.send(result);
         }

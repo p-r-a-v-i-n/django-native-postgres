@@ -43,3 +43,42 @@ async def test_execute_propagates_postgres_query_errors(postgres_database_url):
             database_url=postgres_database_url,
             sql="SELECT FROM",
         )
+
+
+@pytest.mark.asyncio
+async def test_execute_accepts_django_text_parameter(postgres_database_url):
+    rows = await _native.execute(
+        database_url=postgres_database_url,
+        sql="SELECT %s::TEXT",
+        params=("Django",),
+    )
+
+    assert rows == [["Django"]]
+
+
+@pytest.mark.asyncio
+async def test_execute_accepts_multiple_django_text_parameters(
+    postgres_database_url,
+):
+    rows = await _native.execute(
+        database_url=postgres_database_url,
+        sql="SELECT %s::TEXT, %s::TEXT",
+        params=("Django", "Rust"),
+    )
+
+    assert rows == [["Django", "Rust"]]
+
+
+@pytest.mark.asyncio
+async def test_execute_rejects_parameter_count_mismatch(
+    postgres_database_url,
+):
+    with pytest.raises(
+        RuntimeError,
+        match="SQL contains 1 placeholders but received 2 parameters",
+    ):
+        await _native.execute(
+            database_url=postgres_database_url,
+            sql="SELECT %s::TEXT",
+            params=("Django", "Rust"),
+        )

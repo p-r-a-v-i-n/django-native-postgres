@@ -1,6 +1,9 @@
+from collections.abc import Sequence
+
 def build_info() -> tuple[str, str]: ...
 async def runtime_probe(delay_ms: int) -> int: ...
 async def execute(
     database_url: str,
     sql: str,
+    params: Sequence[str] | None = None,
 ) -> list[list[str | None]]: ...

@@ -8,6 +8,7 @@ pub(crate) enum NativeError {
         column: usize,
         source: tokio_postgres::Error,
     },
+    PlaceholderCountMismatch(crate::placeholders::PlaceholderCountMismatch),
 }
 
 impl std::fmt::Display for NativeError {
@@ -31,6 +32,7 @@ impl std::fmt::Display for NativeError {
                     "failed to decode PostgreSQL column {column}: {source}"
                 )
             }
+            Self::PlaceholderCountMismatch(error) => error.fmt(formatter),
         }
     }
 }
@@ -40,7 +42,14 @@ impl std::error::Error for NativeError {
         match self {
             Self::PostgresConnect(error) | Self::PostgresQuery(error) => Some(error),
             Self::PostgresDecode { source, .. } => Some(source),
+            Self::PlaceholderCountMismatch(error) => Some(error),
             _ => None,
         }
+    }
+}
+
+impl From<crate::placeholders::PlaceholderCountMismatch> for NativeError {
+    fn from(error: crate::placeholders::PlaceholderCountMismatch) -> Self {
+        Self::PlaceholderCountMismatch(error)
     }
 }

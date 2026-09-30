@@ -1,17 +1,29 @@
 use crate::error::NativeError;
+use crate::parameter::QueryParameter;
+use crate::placeholders::rewrite_django_placeholders;
 use tokio_postgres::NoTls;
+use tokio_postgres::types::ToSql;
 
 pub(crate) type TextRows = Vec<Vec<Option<String>>>;
 
-pub(crate) async fn execute(database_url: &str, sql: &str) -> Result<TextRows, NativeError> {
+pub(crate) async fn execute(
+    database_url: &str,
+    sql: &str,
+    params: &[QueryParameter],
+) -> Result<TextRows, NativeError> {
     let (client, connection) = tokio_postgres::connect(database_url, NoTls)
         .await
         .map_err(NativeError::PostgresConnect)?;
 
     let _connection_task = tokio::spawn(connection);
 
+    let postgres_params: Vec<&(dyn ToSql + Sync)> =
+        params.iter().map(QueryParameter::as_postgres).collect();
+
+    let postgres_sql = rewrite_django_placeholders(sql, params.len())?;
+
     let rows = client
-        .query(sql, &[])
+        .query(postgres_sql.as_str(), &postgres_params)
         .await
         .map_err(NativeError::PostgresQuery)?;
 
