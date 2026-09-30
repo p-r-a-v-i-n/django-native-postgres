@@ -1,0 +1,13 @@
+.venv/
+.env
+.uv-cache/
+target/
+dist/
+*.so
+*.pyd
+*.dylib
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
