@@ -6,7 +6,6 @@ use crate::error::NativeError;
 use crate::postgres::{self, TextRows};
 use tokio::sync::{mpsc, oneshot};
 
-// A command that can be sent to our Tokio runtime.
 enum Command {
     Probe {
         delay_ms: u64,
@@ -56,55 +55,50 @@ pub(crate) async fn execute(database_url: String, sql: String) -> Result<TextRow
         .map_err(|_| NativeError::ResponseChannelClosed)?
 }
 
-// This is the object that Python-facing code uses to talk
-// to the background Tokio runtime.
+// Handle to the command queue owned by the background runtime.
 struct RuntimeService {
     sender: mpsc::Sender<Command>,
 }
 
-// There will only ever be one RuntimeService.
+// Shared by all callers in the current process.
 static RUNTIME_SERVICE: OnceLock<RuntimeService> = OnceLock::new();
 
 impl RuntimeService {
     fn start() -> &'static RuntimeService {
         RUNTIME_SERVICE.get_or_init(|| {
-            // Create the bounded command queue.
+            // A bounded queue applies backpressure during submission bursts.
             let (sender, mut receiver) = mpsc::channel::<Command>(32);
 
-            // Create exactly ONE OS thread.
+            // Database I/O runs on a dedicated current-thread Tokio runtime.
             thread::Builder::new()
                 .name("tokio-runtime".to_string())
                 .spawn(move || {
-                    // Create ONE current-thread Tokio runtime.
                     let runtime = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
                         .expect("failed to create Tokio runtime");
 
-                    // Run the command loop forever.
                     runtime.block_on(async move {
                         while let Some(command) = receiver.recv().await {
-                            // Each command gets its own Tokio task.
+                            // Spawning prevents one request from serializing the command loop.
                             tokio::spawn(handle_command(command));
                         }
                     });
                 })
                 .expect("failed to spawn Tokio runtime thread");
 
-            // Give the caller the sending side of the queue.
             RuntimeService { sender }
         })
     }
 }
 
-// Handle one command.
 async fn handle_command(command: Command) {
     match command {
         Command::Probe { delay_ms, response } => {
-            // Wait without blocking the OS thread.
+            // The timer yields the runtime thread while the probe is pending.
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
 
-            // Send the result back through the oneshot channel.
+            // Cancellation may drop the receiver before this task completes.
             let _ = response.send(delay_ms);
         }
         Command::Execute {
@@ -113,6 +107,7 @@ async fn handle_command(command: Command) {
             response,
         } => {
             let result = postgres::execute(&database_url, &sql).await;
+            // Cancellation may drop the receiver before this task completes.
             let _ = response.send(result);
         }
     }
