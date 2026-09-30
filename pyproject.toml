@@ -21,11 +21,12 @@ classifiers = [
     "Programming Language :: Rust",
     "Topic :: Database",
 ]
-dependencies = ["Django>=6.1"]
+dependencies = ["Django>=6.1", "psycopg>=3.1.12"]
 
 [dependency-groups]
 dev = [
     "maturin>=1.9,<2.0",
+    "psycopg[binary]>=3.1.12",
     "pytest>=8",
     "pytest-asyncio>=1.4.0",
     "pytest-django>=4.14.0",
