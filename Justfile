@@ -37,6 +37,7 @@ lint:
     cargo clippy --all-targets -- -D warnings
 
 format:
+    uv run --no-sync ruff check . --fix
     uv run --no-sync ruff format .
     cargo fmt
 
