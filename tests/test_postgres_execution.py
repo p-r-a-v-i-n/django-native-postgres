@@ -158,3 +158,24 @@ async def test_execute_limits_pool_connections(postgres_database_url):
     results = await asyncio.gather(*queries)
     backend_pids = {rows[0][0] for rows in results}
     assert len(backend_pids) == pool_max_size
+
+
+@pytest.mark.asyncio
+async def test_execute_rejects_zero_pool_max_size(postgres_database_url):
+    await _native.close_pools()
+
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="PostgreSQL pool max size must be greater than zero",
+        ):
+            await asyncio.wait_for(
+                _native.execute(
+                    database_url=postgres_database_url,
+                    sql="SELECT 1",
+                    pool_max_size=0,
+                ),
+                timeout=0.5,
+            )
+    finally:
+        await _native.close_pools()

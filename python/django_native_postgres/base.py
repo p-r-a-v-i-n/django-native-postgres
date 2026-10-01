@@ -1,3 +1,4 @@
+from django.core.exceptions import ImproperlyConfigured
 from django.db.backends.postgresql.base import (
     DatabaseWrapper as PostgreSQLDatabaseWrapper,
 )
@@ -23,6 +24,15 @@ class DatabaseWrapper(PostgreSQLDatabaseWrapper):
                 host=settings.get("HOST") or None,
                 port=settings.get("PORT") or None,
             )
+
+            if (
+                isinstance(pool_max_size, bool)
+                or not isinstance(pool_max_size, int)
+                or pool_max_size <= 0
+            ):
+                raise ImproperlyConfigured(
+                    "native_pool.max_size must be greater than zero"
+                )
 
             executor = NativeExecutor(
                 database_url=database_url, pool_max_size=pool_max_size

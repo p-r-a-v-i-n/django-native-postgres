@@ -15,6 +15,7 @@ pub(crate) enum NativeError {
         column: usize,
         type_name: String,
     },
+    InvalidPoolMaxSize,
 }
 
 impl std::fmt::Display for NativeError {
@@ -55,6 +56,12 @@ impl std::fmt::Display for NativeError {
                 write!(
                     formatter,
                     "unsupported PostgreSQL type {type_name} at column {column}"
+                )
+            }
+            Self::InvalidPoolMaxSize => {
+                write!(
+                    formatter,
+                    "PostgreSQL pool max size must be greater than zero"
                 )
             }
         }

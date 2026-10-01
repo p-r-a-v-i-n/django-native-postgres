@@ -134,6 +134,9 @@ async fn get_or_create_pool(
     database_url: &str,
     pool_max_size: usize,
 ) -> Result<Pool, NativeError> {
+    if pool_max_size == 0 {
+        return Err(NativeError::InvalidPoolMaxSize);
+    }
     let mut pools = pools.lock().await;
 
     if let Some(pool) = pools.get(database_url) {

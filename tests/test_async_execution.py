@@ -1,6 +1,7 @@
 from unittest import mock
 
 import pytest
+from django.core.exceptions import ImproperlyConfigured
 from django.db import connections
 from django_native_postgres.base import DatabaseWrapper
 from django_native_postgres.executor import NativeExecutor
@@ -37,6 +38,24 @@ def test_database_wrapper_builds_and_caches_native_executor():
         "host": "database.example.com",
         "port": "5432",
     }
+
+
+def test_database_wrapper_rejects_zero_native_pool_max_size():
+    setting_dict = {
+        **connections["default"].settings_dict,
+        "OPTIONS": {
+            "native_pool": {
+                "max_size": 0,
+            },
+        },
+    }
+    connection = DatabaseWrapper(setting_dict, alias="default")
+
+    with pytest.raises(
+        ImproperlyConfigured,
+        match=r"native_pool\.max_size must be greater than zero",
+    ):
+        connection.get_async_executor()
 
 
 @pytest.mark.asyncio
