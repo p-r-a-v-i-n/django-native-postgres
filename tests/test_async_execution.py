@@ -2,7 +2,34 @@ from unittest import mock
 
 import pytest
 from django.db import connections
+from django_native_postgres.base import DatabaseWrapper
 from django_native_postgres.executor import NativeExecutor
+from psycopg.conninfo import conninfo_to_dict
+
+
+def test_database_wrapper_builds_and_caches_native_executor():
+    setting_dict = {
+        "ENGINE": "django_native_postgres",
+        "NAME": "example_database",
+        "USER": "example_user",
+        "PASSWORD": "example_password",
+        "HOST": "database.example.com",
+        "PORT": "5432",
+        "OPTIONS": {},
+    }
+    connection = DatabaseWrapper(setting_dict, alias="default")
+
+    executor = connection.get_async_executor()
+
+    assert isinstance(executor, NativeExecutor)
+    assert connection.get_async_executor() is executor
+    assert conninfo_to_dict(executor.database_url) == {
+        "dbname": "example_database",
+        "user": "example_user",
+        "password": "example_password",
+        "host": "database.example.com",
+        "port": "5432",
+    }
 
 
 @pytest.mark.asyncio
