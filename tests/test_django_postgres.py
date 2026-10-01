@@ -57,3 +57,12 @@ async def test_django_compiled_query_executes_through_rust(
     )
 
     assert rows == [["Django"]]
+
+
+@pytest.mark.asyncio
+async def test_django_connection_executes_compiled_query_through_native_executor(
+    compiled_book_query,
+):
+    _, sql, params = compiled_book_query
+    rows = await connections["default"].aexecute(sql, params)
+    assert rows == [["Django"]]
