@@ -3,11 +3,21 @@ pub(crate) enum NativeError {
     CommandChannelClosed,
     ResponseChannelClosed,
     PostgresConnect(tokio_postgres::Error),
+    PostgresPoolBuild(String),
+    PostgresPoolAcquire(String),
     PostgresQuery(tokio_postgres::Error),
     PostgresDecode {
         column: usize,
         source: tokio_postgres::Error,
     },
+    PlaceholderCountMismatch(crate::placeholders::PlaceholderCountMismatch),
+    UnsupportedPostgresType {
+        column: usize,
+        type_name: String,
+    },
+    InvalidPoolMaxSize,
+    InvalidPoolWaitTimeout,
+    PoolHandleClosed,
 }
 
 impl std::fmt::Display for NativeError {
@@ -22,6 +32,18 @@ impl std::fmt::Display for NativeError {
             Self::PostgresConnect(error) => {
                 write!(formatter, "failed to connect to PostgreSQL: {error}")
             }
+            Self::PostgresPoolBuild(error) => {
+                write!(
+                    formatter,
+                    "failed to build PostgreSQL connection pool: {error}"
+                )
+            }
+            Self::PostgresPoolAcquire(error) => {
+                write!(
+                    formatter,
+                    "failed to acquire PostgreSQL connection: {error}"
+                )
+            }
             Self::PostgresQuery(error) => {
                 write!(formatter, "PostgreSQL query failed: {error}")
             }
@@ -30,6 +52,28 @@ impl std::fmt::Display for NativeError {
                     formatter,
                     "failed to decode PostgreSQL column {column}: {source}"
                 )
+            }
+            Self::PlaceholderCountMismatch(error) => error.fmt(formatter),
+            Self::UnsupportedPostgresType { column, type_name } => {
+                write!(
+                    formatter,
+                    "unsupported PostgreSQL type {type_name} at column {column}"
+                )
+            }
+            Self::InvalidPoolMaxSize => {
+                write!(
+                    formatter,
+                    "PostgreSQL pool max size must be greater than zero"
+                )
+            }
+            Self::InvalidPoolWaitTimeout => {
+                write!(
+                    formatter,
+                    "PostgreSQL pool wait timeout must be a positive integer"
+                )
+            }
+            Self::PoolHandleClosed => {
+                write!(formatter, "PostgreSQL pool handle is closed")
             }
         }
     }
@@ -40,7 +84,14 @@ impl std::error::Error for NativeError {
         match self {
             Self::PostgresConnect(error) | Self::PostgresQuery(error) => Some(error),
             Self::PostgresDecode { source, .. } => Some(source),
+            Self::PlaceholderCountMismatch(error) => Some(error),
             _ => None,
         }
+    }
+}
+
+impl From<crate::placeholders::PlaceholderCountMismatch> for NativeError {
+    fn from(error: crate::placeholders::PlaceholderCountMismatch) -> Self {
+        Self::PlaceholderCountMismatch(error)
     }
 }

@@ -36,6 +36,11 @@ lint:
     uv run --no-sync ruff check .
     cargo clippy --all-targets -- -D warnings
 
+format:
+    uv run --no-sync ruff check . --fix
+    uv run --no-sync ruff format .
+    cargo fmt
+
 format-check:
     uv run --no-sync ruff format --check .
     cargo fmt --check
@@ -86,4 +91,4 @@ db-down:
     fi
 
 test-postgres: db-up
-    @DJANGO_NATIVE_POSTGRES_TEST_DATABASE_URL="$DNP_TEST_DATABASE_URL" uv run --no-sync pytest -q tests/test_postgres_execution.py
+    @DJANGO_NATIVE_POSTGRES_TEST_DATABASE_URL="$DNP_TEST_DATABASE_URL" uv run --no-sync pytest -q tests/test_postgres_execution.py tests/test_django_postgres.py
