@@ -38,6 +38,14 @@ def compiled_book_query(transactional_db):
     return database_url, sql, params
 
 
+@pytest.fixture
+def compiled_book_exists_query(transactional_db):
+    Book.objects.create(name="Django")
+
+    query = Book.objects.filter(name="Django").query.exists()
+    return query.get_compiler(using="default").as_sql()
+
+
 def test_django_can_create_and_query_model_with_sync_backend():
     Book.objects.create(name="Django")
 
@@ -66,3 +74,14 @@ async def test_django_connection_executes_compiled_query_through_native_executor
     _, sql, params = compiled_book_query
     rows = await connections["default"].aexecute(sql, params)
     assert rows == [["Django"]]
+
+
+@pytest.mark.asyncio
+async def test_django_exists_query_executes_through_native_executor(
+    compiled_book_exists_query,
+):
+    sql, params = compiled_book_exists_query
+
+    rows = await connections["default"].aexecute(sql, params)
+
+    assert rows == [[1]]

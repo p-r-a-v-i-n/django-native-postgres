@@ -27,13 +27,15 @@ pub(crate) async fn execute(
 
     let _connection_task = tokio::spawn(connection);
 
-    let postgres_params: Vec<&(dyn ToSql + Sync)> =
-        params.iter().map(QueryParameter::as_postgres).collect();
+    let postgres_params: Vec<(&(dyn ToSql + Sync), Type)> = params
+        .iter()
+        .map(|parameter| (parameter.as_postgres(), parameter.postgres_type()))
+        .collect();
 
     let postgres_sql = rewrite_django_placeholders(sql, params.len())?;
 
     let rows = client
-        .query(postgres_sql.as_str(), &postgres_params)
+        .query_typed(postgres_sql.as_str(), &postgres_params)
         .await
         .map_err(NativeError::PostgresQuery)?;
 

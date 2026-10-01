@@ -92,3 +92,16 @@ async def test_execute_accepts_integer_parameter(postgres_database_url):
         params=(42,),
     )
     assert rows == [[42]]
+
+
+@pytest.mark.asyncio
+async def test_execute_assigns_type_to_untyped_integer_parameter(
+    postgres_database_url,
+):
+    rows = await _native.execute(
+        database_url=postgres_database_url,
+        sql="SELECT %s",
+        params=(42,),
+    )
+
+    assert rows == [[42]]
