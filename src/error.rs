@@ -3,6 +3,8 @@ pub(crate) enum NativeError {
     CommandChannelClosed,
     ResponseChannelClosed,
     PostgresConnect(tokio_postgres::Error),
+    PostgresPoolBuild(String),
+    PostgresPoolAcquire(String),
     PostgresQuery(tokio_postgres::Error),
     PostgresDecode {
         column: usize,
@@ -26,6 +28,18 @@ impl std::fmt::Display for NativeError {
             }
             Self::PostgresConnect(error) => {
                 write!(formatter, "failed to connect to PostgreSQL: {error}")
+            }
+            Self::PostgresPoolBuild(error) => {
+                write!(
+                    formatter,
+                    "failed to build PostgreSQL connection pool: {error}"
+                )
+            }
+            Self::PostgresPoolAcquire(error) => {
+                write!(
+                    formatter,
+                    "failed to acquire PostgreSQL connection: {error}"
+                )
             }
             Self::PostgresQuery(error) => {
                 write!(formatter, "PostgreSQL query failed: {error}")

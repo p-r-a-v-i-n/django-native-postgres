@@ -1,9 +1,12 @@
 use crate::error::NativeError;
 use crate::parameter::QueryParameter;
 use crate::placeholders::rewrite_django_placeholders;
+use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use pyo3::prelude::*;
 use tokio_postgres::NoTls;
 use tokio_postgres::types::{ToSql, Type};
+
+const DEFAULT_POOL_MAX_SIZE: usize = 16;
 
 #[derive(Debug, IntoPyObject)]
 pub(crate) enum QueryValue {
@@ -16,16 +19,31 @@ pub(crate) enum QueryValue {
 
 pub(crate) type QueryRows = Vec<Vec<Option<QueryValue>>>;
 
+pub(crate) fn create_pool(database_url: &str) -> Result<Pool, NativeError> {
+    let postgres_config = database_url.parse().map_err(NativeError::PostgresConnect)?;
+    let manager = Manager::from_config(
+        postgres_config,
+        NoTls,
+        ManagerConfig {
+            recycling_method: RecyclingMethod::Fast,
+        },
+    );
+
+    Pool::builder(manager)
+        .max_size(DEFAULT_POOL_MAX_SIZE)
+        .build()
+        .map_err(|error| NativeError::PostgresPoolBuild(error.to_string()))
+}
+
 pub(crate) async fn execute(
-    database_url: &str,
+    pool: &Pool,
     sql: &str,
     params: &[QueryParameter],
 ) -> Result<QueryRows, NativeError> {
-    let (client, connection) = tokio_postgres::connect(database_url, NoTls)
+    let client = pool
+        .get()
         .await
-        .map_err(NativeError::PostgresConnect)?;
-
-    let _connection_task = tokio::spawn(connection);
+        .map_err(|error| NativeError::PostgresPoolAcquire(error.to_string()))?;
 
     let postgres_params: Vec<(&(dyn ToSql + Sync), Type)> = params
         .iter()

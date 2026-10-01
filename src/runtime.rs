@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
@@ -5,7 +7,10 @@ use std::time::Duration;
 use crate::error::NativeError;
 use crate::parameter::QueryParameter;
 use crate::postgres::{self, QueryRows};
-use tokio::sync::{mpsc, oneshot};
+use deadpool_postgres::Pool;
+use tokio::sync::{Mutex, mpsc, oneshot};
+
+type PoolRegistry = Arc<Mutex<HashMap<String, Pool>>>;
 
 enum Command {
     Probe {
@@ -17,6 +22,9 @@ enum Command {
         sql: String,
         params: Vec<QueryParameter>,
         response: oneshot::Sender<Result<QueryRows, NativeError>>,
+    },
+    ClosePools {
+        response: oneshot::Sender<()>,
     },
 }
 
@@ -62,6 +70,23 @@ pub(crate) async fn execute(
         .map_err(|_| NativeError::ResponseChannelClosed)?
 }
 
+pub(crate) async fn close_pools() -> Result<(), NativeError> {
+    let service = RuntimeService::start();
+    let (response_tx, response_rx) = oneshot::channel();
+
+    service
+        .sender
+        .send(Command::ClosePools {
+            response: response_tx,
+        })
+        .await
+        .map_err(|_| NativeError::CommandChannelClosed)?;
+
+    response_rx
+        .await
+        .map_err(|_| NativeError::ResponseChannelClosed)
+}
+
 // Handle to the command queue owned by the background runtime.
 struct RuntimeService {
     sender: mpsc::Sender<Command>,
@@ -86,9 +111,11 @@ impl RuntimeService {
                         .expect("failed to create Tokio runtime");
 
                     runtime.block_on(async move {
+                        let pools = Arc::new(Mutex::new(HashMap::new()));
+
                         while let Some(command) = receiver.recv().await {
                             // Spawning prevents one request from serializing the command loop.
-                            tokio::spawn(handle_command(command));
+                            tokio::spawn(handle_command(command, Arc::clone(&pools)));
                         }
                     });
                 })
@@ -99,7 +126,19 @@ impl RuntimeService {
     }
 }
 
-async fn handle_command(command: Command) {
+async fn get_or_create_pool(pools: &PoolRegistry, database_url: &str) -> Result<Pool, NativeError> {
+    let mut pools = pools.lock().await;
+
+    if let Some(pool) = pools.get(database_url) {
+        return Ok(pool.clone());
+    }
+
+    let pool = postgres::create_pool(database_url)?;
+    pools.insert(database_url.to_string(), pool.clone());
+    Ok(pool)
+}
+
+async fn handle_command(command: Command, pools: PoolRegistry) {
     match command {
         Command::Probe { delay_ms, response } => {
             // The timer yields the runtime thread while the probe is pending.
@@ -114,9 +153,19 @@ async fn handle_command(command: Command) {
             params,
             response,
         } => {
-            let result = postgres::execute(&database_url, &sql, &params).await;
+            let result = match get_or_create_pool(&pools, &database_url).await {
+                Ok(pool) => postgres::execute(&pool, &sql, &params).await,
+                Err(error) => Err(error),
+            };
             // Cancellation may drop the receiver before this task completes.
             let _ = response.send(result);
+        }
+        Command::ClosePools { response } => {
+            let mut pools = pools.lock().await;
+            for (_, pool) in pools.drain() {
+                pool.close();
+            }
+            let _ = response.send(());
         }
     }
 }

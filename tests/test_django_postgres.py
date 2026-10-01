@@ -1,3 +1,4 @@
+import asyncio
 import os
 from unittest import mock
 
@@ -15,6 +16,12 @@ pytestmark = [
         reason="DJANGO_NATIVE_POSTGRES_TEST_DATABASE_URL is not configured",
     ),
 ]
+
+
+@pytest.fixture(scope="module", autouse=True)
+def close_native_pools_after_tests():
+    yield
+    asyncio.run(_native.close_pools())
 
 
 @pytest.fixture

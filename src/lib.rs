@@ -31,11 +31,17 @@ async fn execute(
         .map_err(to_python_error)
 }
 
+#[pyfunction]
+async fn close_pools() -> PyResult<()> {
+    runtime::close_pools().await.map_err(to_python_error)
+}
+
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(build_info, module)?)?;
     module.add_function(wrap_pyfunction!(runtime_probe, module)?)?;
     module.add_function(wrap_pyfunction!(execute, module)?)?;
+    module.add_function(wrap_pyfunction!(close_pools, module)?)?;
     Ok(())
 }
 

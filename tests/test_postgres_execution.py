@@ -27,6 +27,37 @@ async def test_execute_returns_text_rows_from_postgres(postgres_database_url):
 
 
 @pytest.mark.asyncio
+async def test_execute_reuses_postgres_connection(postgres_database_url):
+    first_rows = await _native.execute(
+        database_url=postgres_database_url,
+        sql="SELECT pg_backend_pid()",
+    )
+    second_rows = await _native.execute(
+        database_url=postgres_database_url,
+        sql="SELECT pg_backend_pid()",
+    )
+
+    assert second_rows == first_rows
+
+
+@pytest.mark.asyncio
+async def test_close_pools_releases_postgres_connection(postgres_database_url):
+    first_rows = await _native.execute(
+        database_url=postgres_database_url,
+        sql="SELECT pg_backend_pid()",
+    )
+
+    await _native.close_pools()
+
+    second_rows = await _native.execute(
+        database_url=postgres_database_url,
+        sql="SELECT pg_backend_pid()",
+    )
+
+    assert second_rows != first_rows
+
+
+@pytest.mark.asyncio
 async def test_execute_decodes_multiple_nullable_text_columns(postgres_database_url):
     rows = await _native.execute(
         database_url=postgres_database_url,
