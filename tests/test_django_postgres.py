@@ -1,4 +1,5 @@
 import os
+from unittest import mock
 
 import pytest
 from django.db import connections
@@ -46,6 +47,11 @@ def compiled_book_exists_query(transactional_db):
     return query.get_compiler(using="default").as_sql()
 
 
+@pytest.fixture
+def django_book(transactional_db):
+    return Book.objects.create(name="Django")
+
+
 def test_django_can_create_and_query_model_with_sync_backend():
     Book.objects.create(name="Django")
 
@@ -85,3 +91,19 @@ async def test_django_exists_query_executes_through_native_executor(
     rows = await connections["default"].aexecute(sql, params)
 
     assert rows == [[1]]
+
+
+@pytest.mark.asyncio
+async def test_django_aexists_executes_through_native_backend(django_book):
+    connection = connections["default"]
+    executor = connection.get_async_executor()
+
+    with mock.patch.object(
+        executor,
+        "execute",
+        wraps=executor.execute,
+    ) as execute:
+        result = await Book.objects.filter(name=django_book.name).aexists()
+
+    assert result is True
+    execute.assert_awaited_once()
