@@ -2,6 +2,7 @@ from unittest import mock
 
 import pytest
 from django.db import connections
+from django_native_postgres.executor import NativeExecutor
 
 
 @pytest.mark.asyncio
@@ -23,3 +24,25 @@ async def test_aexecute_forwards_query_to_process_executor():
     assert result is executor.execute.return_value
     executor.execute.assert_awaited_once_with(sql=sql, params=params)
     assert connection.connection is None
+
+
+@pytest.mark.asyncio
+async def test_native_executor_forwards_query_to_native_extension():
+    executor = NativeExecutor(database_url="postgresql://example")
+    rows = [[42]]
+
+    with mock.patch(
+        "django_native_postgres.executor._native.execute",
+        new=mock.AsyncMock(return_value=rows),
+    ) as execute:
+        result = await executor.execute(
+            sql="SELECT %s::BIGINT",
+            params=(42,),
+        )
+
+    assert result is rows
+    execute.assert_awaited_once_with(
+        database_url="postgresql://example",
+        sql="SELECT %s::BIGINT",
+        params=(42,),
+    )
