@@ -8,4 +8,5 @@ async def execute(
     sql: str,
     params: Sequence[str | int] | None = None,
     pool_max_size: int = 16,
+    pool_wait_timeout_ms: int = 30_000,
 ) -> list[list[str | int | None]]: ...

@@ -3,6 +3,7 @@ use crate::parameter::QueryParameter;
 use crate::placeholders::rewrite_django_placeholders;
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use pyo3::prelude::*;
+use std::time::Duration;
 use tokio_postgres::NoTls;
 use tokio_postgres::types::{ToSql, Type};
 
@@ -17,7 +18,11 @@ pub(crate) enum QueryValue {
 
 pub(crate) type QueryRows = Vec<Vec<Option<QueryValue>>>;
 
-pub(crate) fn create_pool(database_url: &str, pool_max_size: usize) -> Result<Pool, NativeError> {
+pub(crate) fn create_pool(
+    database_url: &str,
+    pool_max_size: usize,
+    pool_wait_timeout_ms: u64,
+) -> Result<Pool, NativeError> {
     let postgres_config = database_url.parse().map_err(NativeError::PostgresConnect)?;
     let manager = Manager::from_config(
         postgres_config,
@@ -29,6 +34,8 @@ pub(crate) fn create_pool(database_url: &str, pool_max_size: usize) -> Result<Po
 
     Pool::builder(manager)
         .max_size(pool_max_size)
+        .wait_timeout(Some(Duration::from_millis(pool_wait_timeout_ms)))
+        .runtime(deadpool_postgres::Runtime::Tokio1)
         .build()
         .map_err(|error| NativeError::PostgresPoolBuild(error.to_string()))
 }

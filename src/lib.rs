@@ -20,16 +20,23 @@ async fn runtime_probe(delay_ms: u64) -> PyResult<u64> {
     runtime::probe(delay_ms).await.map_err(to_python_error)
 }
 
-#[pyfunction(signature = (database_url, sql, params=None, pool_max_size=16))]
+#[pyfunction(signature = (database_url, sql, params=None, pool_max_size=16, pool_wait_timeout_ms=30_000))]
 async fn execute(
     database_url: String,
     sql: String,
     params: Option<Vec<parameter::QueryParameter>>,
     pool_max_size: usize,
+    pool_wait_timeout_ms: u64,
 ) -> PyResult<postgres::QueryRows> {
-    runtime::execute(database_url, sql, params.unwrap_or_default(), pool_max_size)
-        .await
-        .map_err(to_python_error)
+    runtime::execute(
+        database_url,
+        sql,
+        params.unwrap_or_default(),
+        pool_max_size,
+        pool_wait_timeout_ms,
+    )
+    .await
+    .map_err(to_python_error)
 }
 
 #[pyfunction]

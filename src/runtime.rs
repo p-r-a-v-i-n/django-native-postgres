@@ -20,6 +20,7 @@ enum Command {
     Execute {
         database_url: String,
         pool_max_size: usize,
+        pool_wait_timeout_ms: u64,
         sql: String,
         params: Vec<QueryParameter>,
         response: oneshot::Sender<Result<QueryRows, NativeError>>,
@@ -52,6 +53,7 @@ pub(crate) async fn execute(
     sql: String,
     params: Vec<QueryParameter>,
     pool_max_size: usize,
+    pool_wait_timeout_ms: u64,
 ) -> Result<QueryRows, NativeError> {
     let service = RuntimeService::start();
     let (response_tx, response_rx) = oneshot::channel();
@@ -61,6 +63,7 @@ pub(crate) async fn execute(
         .send(Command::Execute {
             database_url,
             pool_max_size,
+            pool_wait_timeout_ms,
             sql,
             params,
             response: response_tx,
@@ -133,6 +136,7 @@ async fn get_or_create_pool(
     pools: &PoolRegistry,
     database_url: &str,
     pool_max_size: usize,
+    pool_wait_timeout_ms: u64,
 ) -> Result<Pool, NativeError> {
     if pool_max_size == 0 {
         return Err(NativeError::InvalidPoolMaxSize);
@@ -143,7 +147,7 @@ async fn get_or_create_pool(
         return Ok(pool.clone());
     }
 
-    let pool = postgres::create_pool(database_url, pool_max_size)?;
+    let pool = postgres::create_pool(database_url, pool_max_size, pool_wait_timeout_ms)?;
     pools.insert(database_url.to_string(), pool.clone());
     Ok(pool)
 }
@@ -160,11 +164,19 @@ async fn handle_command(command: Command, pools: PoolRegistry) {
         Command::Execute {
             database_url,
             pool_max_size,
+            pool_wait_timeout_ms,
             sql,
             params,
             response,
         } => {
-            let result = match get_or_create_pool(&pools, &database_url, pool_max_size).await {
+            let result = match get_or_create_pool(
+                &pools,
+                &database_url,
+                pool_max_size,
+                pool_wait_timeout_ms,
+            )
+            .await
+            {
                 Ok(pool) => postgres::execute(&pool, &sql, &params).await,
                 Err(error) => Err(error),
             };

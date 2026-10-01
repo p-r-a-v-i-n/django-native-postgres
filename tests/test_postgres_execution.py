@@ -179,3 +179,38 @@ async def test_execute_rejects_zero_pool_max_size(postgres_database_url):
             )
     finally:
         await _native.close_pools()
+
+
+@pytest.mark.asyncio
+async def test_execute_times_out_when_pool_is_exhausted(postgres_database_url):
+    await _native.close_pools()
+
+    try:
+        first_query = _native.execute(
+            database_url=postgres_database_url,
+            sql="SELECT pg_backend_pid() FROM pg_sleep(0.2)",
+            pool_max_size=1,
+            pool_wait_timeout_ms=50,
+        )
+        second_query = _native.execute(
+            database_url=postgres_database_url,
+            sql="SELECT pg_backend_pid() FROM pg_sleep(0.2)",
+            pool_max_size=1,
+            pool_wait_timeout_ms=50,
+        )
+
+        results = await asyncio.gather(
+            first_query,
+            second_query,
+            return_exceptions=True,
+        )
+    finally:
+        await _native.close_pools()
+
+    rows = [result for result in results if isinstance(result, list)]
+    errors = [result for result in results if isinstance(result, Exception)]
+
+    assert len(rows) == 1
+    assert len(errors) == 1
+    assert isinstance(errors[0], RuntimeError)
+    assert "failed to acquire PostgreSQL connection" in str(errors[0])

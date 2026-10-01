@@ -17,6 +17,7 @@ class DatabaseWrapper(PostgreSQLDatabaseWrapper):
             settings = self.settings_dict
             pool_options = settings.get("OPTIONS", {}).get("native_pool", {})
             pool_max_size = pool_options.get("max_size", 16)
+            pool_wait_timeout_ms = pool_options.get("wait_timeout_ms", 30_000)
             database_url = make_conninfo(
                 dbname=settings.get("NAME") or "postgres",
                 user=settings.get("USER") or None,
@@ -35,7 +36,9 @@ class DatabaseWrapper(PostgreSQLDatabaseWrapper):
                 )
 
             executor = NativeExecutor(
-                database_url=database_url, pool_max_size=pool_max_size
+                database_url=database_url,
+                pool_max_size=pool_max_size,
+                pool_wait_timeout_ms=pool_wait_timeout_ms,
             )
             self._native_executor = executor
         return executor
