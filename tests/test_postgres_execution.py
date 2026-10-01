@@ -77,6 +77,58 @@ async def test_close_pools_releases_postgres_connection(postgres_database_url):
 
 
 @pytest.mark.asyncio
+async def test_pool_replaces_broken_postgres_connection(postgres_database_url):
+    await _native.close_pools()
+
+    try:
+        first_rows = await _native.execute(
+            database_url=postgres_database_url,
+            sql="SELECT pg_backend_pid()",
+        )
+
+        with pytest.raises(RuntimeError, match="PostgreSQL query failed"):
+            await _native.execute(
+                database_url=postgres_database_url,
+                sql="SELECT pg_terminate_backend(pg_backend_pid())",
+            )
+
+        second_rows = await _native.execute(
+            database_url=postgres_database_url,
+            sql="SELECT pg_backend_pid()",
+        )
+
+        assert second_rows != first_rows
+    finally:
+        await _native.close_pools()
+
+
+@pytest.mark.asyncio
+async def test_pool_keeps_connection_after_safe_query_error(postgres_database_url):
+    await _native.close_pools()
+
+    try:
+        first_rows = await _native.execute(
+            database_url=postgres_database_url,
+            sql="SELECT pg_backend_pid()",
+        )
+
+        with pytest.raises(RuntimeError, match="PostgreSQL query failed"):
+            await _native.execute(
+                database_url=postgres_database_url,
+                sql="SELECT FROM",
+            )
+
+        second_rows = await _native.execute(
+            database_url=postgres_database_url,
+            sql="SELECT pg_backend_pid()",
+        )
+
+        assert second_rows == first_rows
+    finally:
+        await _native.close_pools()
+
+
+@pytest.mark.asyncio
 async def test_execute_decodes_multiple_nullable_text_columns(postgres_database_url):
     rows = await _native.execute(
         database_url=postgres_database_url,

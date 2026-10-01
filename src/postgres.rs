@@ -1,10 +1,11 @@
 use crate::error::NativeError;
 use crate::parameter::QueryParameter;
 use crate::placeholders::rewrite_django_placeholders;
-use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
+use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod};
 use pyo3::prelude::*;
 use std::time::Duration;
 use tokio_postgres::NoTls;
+use tokio_postgres::error::Severity;
 use tokio_postgres::types::{ToSql, Type};
 
 #[derive(Debug, IntoPyObject)]
@@ -57,10 +58,25 @@ pub(crate) async fn execute(
 
     let postgres_sql = rewrite_django_placeholders(sql, params.len())?;
 
-    let rows = client
+    let rows = match client
         .query_typed(postgres_sql.as_str(), &postgres_params)
         .await
-        .map_err(NativeError::PostgresQuery)?;
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            let connection_can_be_reused = !client.is_closed()
+                && error
+                    .as_db_error()
+                    .and_then(|error| error.parsed_severity())
+                    == Some(Severity::Error);
+
+            if !connection_can_be_reused {
+                drop(Object::take(client));
+            }
+
+            return Err(NativeError::PostgresQuery(error));
+        }
+    };
 
     let mut decoded_rows = Vec::with_capacity(rows.len());
 
