@@ -17,6 +17,30 @@ async def _get_backend_pid(pool):
     return rows[0][0]
 
 
+async def _wait_for_backend_count(
+    pool,
+    sql,
+    backend_pid,
+    expected_count,
+):
+    event_loop = asyncio.get_running_loop()
+    deadline = event_loop.time() + 2
+
+    while True:
+        rows = await _native.execute(
+            pool=pool,
+            sql=sql,
+            params=(backend_pid,),
+        )
+        if rows == [[expected_count]]:
+            return
+        if event_loop.time() >= deadline:
+            pytest.fail(
+                f"expected backend count {expected_count}, received {rows[0][0]}"
+            )
+        await asyncio.sleep(0.01)
+
+
 def _get_backend_pid_in_child(pool, connection):
     backend_pid = asyncio.run(_get_backend_pid(pool))
     connection.send(backend_pid)
@@ -249,6 +273,21 @@ def test_create_pool_rejects_zero_max_size(postgres_database_url):
         )
 
 
+@pytest.mark.parametrize("wait_timeout_ms", [0, -1])
+def test_create_pool_rejects_invalid_wait_timeout(
+    postgres_database_url,
+    wait_timeout_ms,
+):
+    with pytest.raises(
+        RuntimeError,
+        match="PostgreSQL pool wait timeout must be a positive integer",
+    ):
+        _native.create_pool(
+            database_url=postgres_database_url,
+            wait_timeout_ms=wait_timeout_ms,
+        )
+
+
 @pytest.mark.asyncio
 async def test_execute_times_out_when_pool_is_exhausted(postgres_database_url):
     await _native.close_pools()
@@ -414,6 +453,96 @@ async def test_close_pool_is_idempotent(postgres_database_url):
             pool=pool,
             sql="SELECT 1",
         )
+
+
+@pytest.mark.asyncio
+async def test_close_pool_releases_idle_postgres_connection(
+    postgres_database_url,
+):
+    target_pool = _native.create_pool(database_url=postgres_database_url)
+    observer_pool = _native.create_pool(database_url=postgres_database_url)
+
+    try:
+        target_backend_pid = await _get_backend_pid(target_pool)
+
+        await _native.close_pool(target_pool)
+
+        await _wait_for_backend_count(
+            observer_pool,
+            """
+                SELECT COUNT(*)::BIGINT
+                FROM pg_stat_activity
+                WHERE pid = %s
+            """,
+            target_backend_pid,
+            0,
+        )
+    finally:
+        await _native.close_pools()
+
+
+@pytest.mark.asyncio
+async def test_close_pool_allows_active_query_to_finish(postgres_database_url):
+    target_pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+    )
+    observer_pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+    )
+    lock_id = os.getpid()
+    query = None
+
+    try:
+        await _native.execute(
+            pool=observer_pool,
+            sql="SELECT 1::BIGINT FROM pg_advisory_lock(%s)",
+            params=(lock_id,),
+        )
+        target_backend_pid = await _get_backend_pid(target_pool)
+        query = asyncio.create_task(
+            _native.execute(
+                pool=target_pool,
+                sql="SELECT pg_backend_pid() FROM pg_advisory_lock(%s)",
+                params=(lock_id,),
+            )
+        )
+
+        await _wait_for_backend_count(
+            observer_pool,
+            """
+                SELECT COUNT(*)::BIGINT
+                FROM pg_stat_activity
+                WHERE pid = %s AND wait_event_type = 'Lock'
+            """,
+            target_backend_pid,
+            1,
+        )
+
+        await _native.close_pool(target_pool)
+        await _native.execute(
+            pool=observer_pool,
+            sql="SELECT 1::BIGINT FROM pg_advisory_unlock(%s)",
+            params=(lock_id,),
+        )
+
+        rows = await asyncio.wait_for(query, timeout=2)
+        assert rows == [[target_backend_pid]]
+
+        with pytest.raises(
+            RuntimeError,
+            match="PostgreSQL pool handle is closed",
+        ):
+            await _native.execute(
+                pool=target_pool,
+                sql="SELECT 1",
+            )
+    finally:
+        if query is not None and not query.done():
+            query.cancel()
+            await asyncio.gather(query, return_exceptions=True)
+        await _native.close_pools()
 
 
 @pytest.mark.skipif(

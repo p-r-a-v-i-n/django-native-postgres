@@ -19,11 +19,16 @@ impl PoolHandle {
     pub(crate) fn new(
         database_url: String,
         max_size: usize,
-        wait_timeout_ms: u64,
+        wait_timeout_ms: i64,
     ) -> Result<Self, NativeError> {
         if max_size == 0 {
             return Err(NativeError::InvalidPoolMaxSize);
         }
+
+        let wait_timeout_ms = u64::try_from(wait_timeout_ms)
+            .ok()
+            .filter(|wait_timeout_ms| *wait_timeout_ms > 0)
+            .ok_or(NativeError::InvalidPoolWaitTimeout)?;
 
         Ok(Self {
             id: NEXT_POOL_ID.fetch_add(1, Ordering::Relaxed),

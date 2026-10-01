@@ -25,7 +25,7 @@ async fn runtime_probe(delay_ms: u64) -> PyResult<u64> {
 fn create_pool(
     database_url: String,
     max_size: usize,
-    wait_timeout_ms: u64,
+    wait_timeout_ms: i64,
 ) -> PyResult<pool::PoolHandle> {
     pool::PoolHandle::new(database_url, max_size, wait_timeout_ms).map_err(to_python_error)
 }

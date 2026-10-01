@@ -35,6 +35,15 @@ class DatabaseWrapper(PostgreSQLDatabaseWrapper):
                     "native_pool.max_size must be greater than zero"
                 )
 
+            if (
+                isinstance(pool_wait_timeout_ms, bool)
+                or not isinstance(pool_wait_timeout_ms, int)
+                or pool_wait_timeout_ms <= 0
+            ):
+                raise ImproperlyConfigured(
+                    "native_pool.wait_timeout_ms must be a positive integer"
+                )
+
             executor = NativeExecutor(
                 database_url=database_url,
                 pool_max_size=pool_max_size,

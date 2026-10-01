@@ -69,6 +69,25 @@ def test_database_wrapper_rejects_zero_native_pool_max_size():
         connection.get_async_executor()
 
 
+@pytest.mark.parametrize("wait_timeout_ms", [0, -1, True, "250"])
+def test_database_wrapper_rejects_invalid_pool_wait_timeout(wait_timeout_ms):
+    setting_dict = {
+        **connections["default"].settings_dict,
+        "OPTIONS": {
+            "native_pool": {
+                "wait_timeout_ms": wait_timeout_ms,
+            },
+        },
+    }
+    connection = DatabaseWrapper(setting_dict, alias="default")
+
+    with pytest.raises(
+        ImproperlyConfigured,
+        match=r"native_pool\.wait_timeout_ms must be a positive integer",
+    ):
+        connection.get_async_executor()
+
+
 @pytest.mark.asyncio
 async def test_aexecute_forwards_query_to_process_executor():
     connection = connections["default"]

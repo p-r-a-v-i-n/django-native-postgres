@@ -16,6 +16,7 @@ pub(crate) enum NativeError {
         type_name: String,
     },
     InvalidPoolMaxSize,
+    InvalidPoolWaitTimeout,
     PoolHandleClosed,
 }
 
@@ -63,6 +64,12 @@ impl std::fmt::Display for NativeError {
                 write!(
                     formatter,
                     "PostgreSQL pool max size must be greater than zero"
+                )
+            }
+            Self::InvalidPoolWaitTimeout => {
+                write!(
+                    formatter,
+                    "PostgreSQL pool wait timeout must be a positive integer"
                 )
             }
             Self::PoolHandleClosed => {
