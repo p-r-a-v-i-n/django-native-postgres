@@ -15,7 +15,12 @@ def test_database_wrapper_builds_and_caches_native_executor():
         "PASSWORD": "example_password",
         "HOST": "database.example.com",
         "PORT": "5432",
-        "OPTIONS": {},
+        "TIME_ZONE": None,
+        "OPTIONS": {
+            "native_pool": {
+                "max_size": 4,
+            },
+        },
     }
     connection = DatabaseWrapper(setting_dict, alias="default")
 
@@ -23,6 +28,8 @@ def test_database_wrapper_builds_and_caches_native_executor():
 
     assert isinstance(executor, NativeExecutor)
     assert connection.get_async_executor() is executor
+    assert executor.pool_max_size == 4
+    assert "native_pool" not in connection.get_connection_params()
     assert conninfo_to_dict(executor.database_url) == {
         "dbname": "example_database",
         "user": "example_user",
@@ -55,7 +62,10 @@ async def test_aexecute_forwards_query_to_process_executor():
 
 @pytest.mark.asyncio
 async def test_native_executor_forwards_query_to_native_extension():
-    executor = NativeExecutor(database_url="postgresql://example")
+    executor = NativeExecutor(
+        database_url="postgresql://example",
+        pool_max_size=4,
+    )
     rows = [[42]]
 
     with mock.patch(
@@ -72,4 +82,5 @@ async def test_native_executor_forwards_query_to_native_extension():
         database_url="postgresql://example",
         sql="SELECT %s::BIGINT",
         params=(42,),
+        pool_max_size=4,
     )

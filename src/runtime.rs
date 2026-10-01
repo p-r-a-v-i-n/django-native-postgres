@@ -19,6 +19,7 @@ enum Command {
     },
     Execute {
         database_url: String,
+        pool_max_size: usize,
         sql: String,
         params: Vec<QueryParameter>,
         response: oneshot::Sender<Result<QueryRows, NativeError>>,
@@ -50,6 +51,7 @@ pub(crate) async fn execute(
     database_url: String,
     sql: String,
     params: Vec<QueryParameter>,
+    pool_max_size: usize,
 ) -> Result<QueryRows, NativeError> {
     let service = RuntimeService::start();
     let (response_tx, response_rx) = oneshot::channel();
@@ -58,6 +60,7 @@ pub(crate) async fn execute(
         .sender
         .send(Command::Execute {
             database_url,
+            pool_max_size,
             sql,
             params,
             response: response_tx,
@@ -126,14 +129,18 @@ impl RuntimeService {
     }
 }
 
-async fn get_or_create_pool(pools: &PoolRegistry, database_url: &str) -> Result<Pool, NativeError> {
+async fn get_or_create_pool(
+    pools: &PoolRegistry,
+    database_url: &str,
+    pool_max_size: usize,
+) -> Result<Pool, NativeError> {
     let mut pools = pools.lock().await;
 
     if let Some(pool) = pools.get(database_url) {
         return Ok(pool.clone());
     }
 
-    let pool = postgres::create_pool(database_url)?;
+    let pool = postgres::create_pool(database_url, pool_max_size)?;
     pools.insert(database_url.to_string(), pool.clone());
     Ok(pool)
 }
@@ -149,11 +156,12 @@ async fn handle_command(command: Command, pools: PoolRegistry) {
         }
         Command::Execute {
             database_url,
+            pool_max_size,
             sql,
             params,
             response,
         } => {
-            let result = match get_or_create_pool(&pools, &database_url).await {
+            let result = match get_or_create_pool(&pools, &database_url, pool_max_size).await {
                 Ok(pool) => postgres::execute(&pool, &sql, &params).await,
                 Err(error) => Err(error),
             };

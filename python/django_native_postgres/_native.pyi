@@ -7,4 +7,5 @@ async def execute(
     database_url: str,
     sql: str,
     params: Sequence[str | int] | None = None,
+    pool_max_size: int = 16,
 ) -> list[list[str | int | None]]: ...

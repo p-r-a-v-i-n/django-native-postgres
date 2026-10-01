@@ -6,8 +6,6 @@ use pyo3::prelude::*;
 use tokio_postgres::NoTls;
 use tokio_postgres::types::{ToSql, Type};
 
-const DEFAULT_POOL_MAX_SIZE: usize = 16;
-
 #[derive(Debug, IntoPyObject)]
 pub(crate) enum QueryValue {
     #[pyo3(transparent)]
@@ -19,7 +17,7 @@ pub(crate) enum QueryValue {
 
 pub(crate) type QueryRows = Vec<Vec<Option<QueryValue>>>;
 
-pub(crate) fn create_pool(database_url: &str) -> Result<Pool, NativeError> {
+pub(crate) fn create_pool(database_url: &str, pool_max_size: usize) -> Result<Pool, NativeError> {
     let postgres_config = database_url.parse().map_err(NativeError::PostgresConnect)?;
     let manager = Manager::from_config(
         postgres_config,
@@ -30,7 +28,7 @@ pub(crate) fn create_pool(database_url: &str) -> Result<Pool, NativeError> {
     );
 
     Pool::builder(manager)
-        .max_size(DEFAULT_POOL_MAX_SIZE)
+        .max_size(pool_max_size)
         .build()
         .map_err(|error| NativeError::PostgresPoolBuild(error.to_string()))
 }

@@ -1,3 +1,4 @@
+import asyncio
 import os
 
 import pytest
@@ -136,3 +137,24 @@ async def test_execute_assigns_type_to_untyped_integer_parameter(
     )
 
     assert rows == [[42]]
+
+
+@pytest.mark.asyncio
+async def test_execute_limits_pool_connections(postgres_database_url):
+    await _native.close_pools()
+
+    pool_max_size = 2
+    query_count = pool_max_size * 3
+
+    queries = [
+        _native.execute(
+            database_url=postgres_database_url,
+            sql="SELECT pg_backend_pid() FROM pg_sleep(0.05)",
+            pool_max_size=pool_max_size,
+        )
+        for _ in range(query_count)
+    ]
+
+    results = await asyncio.gather(*queries)
+    backend_pids = {rows[0][0] for rows in results}
+    assert len(backend_pids) == pool_max_size
