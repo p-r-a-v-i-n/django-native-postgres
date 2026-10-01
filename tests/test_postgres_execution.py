@@ -82,3 +82,13 @@ async def test_execute_rejects_parameter_count_mismatch(
             sql="SELECT %s::TEXT",
             params=("Django", "Rust"),
         )
+
+
+@pytest.mark.asyncio
+async def test_execute_accepts_integer_parameter(postgres_database_url):
+    rows = await _native.execute(
+        database_url=postgres_database_url,
+        sql="SELECT %s::BIGINT",
+        params=(42,),
+    )
+    assert rows == [[42]]
