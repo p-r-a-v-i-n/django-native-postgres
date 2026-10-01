@@ -9,6 +9,10 @@ pub(crate) enum NativeError {
         source: tokio_postgres::Error,
     },
     PlaceholderCountMismatch(crate::placeholders::PlaceholderCountMismatch),
+    UnsupportedPostgresType {
+        column: usize,
+        type_name: String,
+    },
 }
 
 impl std::fmt::Display for NativeError {
@@ -33,6 +37,12 @@ impl std::fmt::Display for NativeError {
                 )
             }
             Self::PlaceholderCountMismatch(error) => error.fmt(formatter),
+            Self::UnsupportedPostgresType { column, type_name } => {
+                write!(
+                    formatter,
+                    "unsupported PostgreSQL type {type_name} at column {column}"
+                )
+            }
         }
     }
 }

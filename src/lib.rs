@@ -25,7 +25,7 @@ async fn execute(
     database_url: String,
     sql: String,
     params: Option<Vec<parameter::QueryParameter>>,
-) -> PyResult<postgres::TextRows> {
+) -> PyResult<postgres::QueryRows> {
     runtime::execute(database_url, sql, params.unwrap_or_default())
         .await
         .map_err(to_python_error)

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::error::NativeError;
 use crate::parameter::QueryParameter;
-use crate::postgres::{self, TextRows};
+use crate::postgres::{self, QueryRows};
 use tokio::sync::{mpsc, oneshot};
 
 enum Command {
@@ -16,7 +16,7 @@ enum Command {
         database_url: String,
         sql: String,
         params: Vec<QueryParameter>,
-        response: oneshot::Sender<Result<TextRows, NativeError>>,
+        response: oneshot::Sender<Result<QueryRows, NativeError>>,
     },
 }
 
@@ -42,7 +42,7 @@ pub(crate) async fn execute(
     database_url: String,
     sql: String,
     params: Vec<QueryParameter>,
-) -> Result<TextRows, NativeError> {
+) -> Result<QueryRows, NativeError> {
     let service = RuntimeService::start();
     let (response_tx, response_rx) = oneshot::channel();
 

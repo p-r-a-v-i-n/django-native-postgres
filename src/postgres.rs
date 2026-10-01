@@ -1,16 +1,26 @@
 use crate::error::NativeError;
 use crate::parameter::QueryParameter;
 use crate::placeholders::rewrite_django_placeholders;
+use pyo3::prelude::*;
 use tokio_postgres::NoTls;
-use tokio_postgres::types::ToSql;
+use tokio_postgres::types::{ToSql, Type};
 
-pub(crate) type TextRows = Vec<Vec<Option<String>>>;
+#[derive(Debug, IntoPyObject)]
+pub(crate) enum QueryValue {
+    #[pyo3(transparent)]
+    Text(String),
+
+    #[pyo3(transparent)]
+    Integer(i64),
+}
+
+pub(crate) type QueryRows = Vec<Vec<Option<QueryValue>>>;
 
 pub(crate) async fn execute(
     database_url: &str,
     sql: &str,
     params: &[QueryParameter],
-) -> Result<TextRows, NativeError> {
+) -> Result<QueryRows, NativeError> {
     let (client, connection) = tokio_postgres::connect(database_url, NoTls)
         .await
         .map_err(NativeError::PostgresConnect)?;
@@ -33,9 +43,34 @@ pub(crate) async fn execute(
         let mut decoded_row = Vec::with_capacity(row.len());
 
         for column in 0..row.len() {
-            let value = row
-                .try_get::<usize, Option<String>>(column)
-                .map_err(|source| NativeError::PostgresDecode { column, source })?;
+            let column_type = row.columns()[column].type_();
+
+            let value = if column_type == &Type::TEXT
+                || column_type == &Type::VARCHAR
+                || column_type == &Type::BPCHAR
+                || column_type == &Type::NAME
+            {
+                row.try_get::<usize, Option<String>>(column)
+                    .map(|value| value.map(QueryValue::Text))
+                    .map_err(|source| NativeError::PostgresDecode { column, source })?
+            } else if column_type == &Type::INT2 {
+                row.try_get::<usize, Option<i16>>(column)
+                    .map(|value| value.map(|value| QueryValue::Integer(i64::from(value))))
+                    .map_err(|source| NativeError::PostgresDecode { column, source })?
+            } else if column_type == &Type::INT4 {
+                row.try_get::<usize, Option<i32>>(column)
+                    .map(|value| value.map(|value| QueryValue::Integer(i64::from(value))))
+                    .map_err(|source| NativeError::PostgresDecode { column, source })?
+            } else if column_type == &Type::INT8 {
+                row.try_get::<usize, Option<i64>>(column)
+                    .map(|value| value.map(QueryValue::Integer))
+                    .map_err(|source| NativeError::PostgresDecode { column, source })?
+            } else {
+                return Err(NativeError::UnsupportedPostgresType {
+                    column,
+                    type_name: column_type.name().to_string(),
+                });
+            };
 
             decoded_row.push(value);
         }
