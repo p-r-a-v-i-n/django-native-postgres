@@ -127,3 +127,24 @@ async def test_native_executor_forwards_query_to_native_extension():
         sql="SELECT %s::BIGINT",
         params=(42,),
     )
+
+
+@pytest.mark.asyncio
+async def test_native_executor_closes_pool_handle():
+    pool = object()
+
+    with (
+        mock.patch(
+            "django_native_postgres.executor._native.create_pool",
+            return_value=pool,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.close_pool",
+            new=mock.AsyncMock(),
+            create=True,
+        ) as close_pool,
+    ):
+        executor = NativeExecutor(database_url="postgresql://example")
+        await executor.close()
+
+    close_pool.assert_awaited_once_with(pool)

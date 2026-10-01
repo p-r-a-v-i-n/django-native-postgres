@@ -27,6 +27,30 @@ enum Command {
     ClosePools {
         response: oneshot::Sender<()>,
     },
+    ClosePool {
+        pool_id: u64,
+        response: oneshot::Sender<()>,
+    },
+}
+
+pub(crate) async fn close_pool(pool: PoolHandle) -> Result<(), NativeError> {
+    pool.mark_closed();
+
+    let service = RuntimeService::start();
+    let (response_tx, response_rx) = oneshot::channel();
+
+    service
+        .sender
+        .send(Command::ClosePool {
+            pool_id: pool.id,
+            response: response_tx,
+        })
+        .await
+        .map_err(|_| NativeError::CommandChannelClosed)?;
+
+    response_rx
+        .await
+        .map_err(|_| NativeError::ResponseChannelClosed)
 }
 
 pub(crate) async fn probe(delay_ms: u64) -> Result<u64, NativeError> {
@@ -148,6 +172,11 @@ async fn get_or_create_pool(
     handle: &PoolHandle,
 ) -> Result<Pool, NativeError> {
     let mut pools = pools.lock().await;
+
+    if handle.is_closed() {
+        return Err(NativeError::PoolHandleClosed);
+    }
+
     if let Some(pool) = pools.get(&handle.id) {
         return Ok(pool.clone());
     }
@@ -157,6 +186,12 @@ async fn get_or_create_pool(
         handle.max_size,
         handle.wait_timeout_ms,
     )?;
+
+    // Closing can race with the first pool creation.
+    if handle.is_closed() {
+        pool.close();
+        return Err(NativeError::PoolHandleClosed);
+    }
 
     pools.insert(handle.id, pool.clone());
     Ok(pool)
@@ -187,6 +222,13 @@ async fn handle_command(command: Command, pools: PoolRegistry) {
         Command::ClosePools { response } => {
             let mut pools = pools.lock().await;
             for (_, pool) in pools.drain() {
+                pool.close();
+            }
+            let _ = response.send(());
+        }
+        Command::ClosePool { pool_id, response } => {
+            let pool = pools.lock().await.remove(&pool_id);
+            if let Some(pool) = pool {
                 pool.close();
             }
             let _ = response.send(());

@@ -26,3 +26,6 @@ class NativeExecutor:
             sql=sql,
             params=params,
         )
+
+    async def close(self) -> None:
+        await _native.close_pool(self.pool)

@@ -345,6 +345,77 @@ async def test_pool_handles_keep_their_own_configuration(postgres_database_url):
         await _native.close_pools()
 
 
+@pytest.mark.asyncio
+async def test_close_pool_only_closes_selected_handle(postgres_database_url):
+    await _native.close_pools()
+    first_pool = _native.create_pool(database_url=postgres_database_url)
+    second_pool = _native.create_pool(database_url=postgres_database_url)
+
+    try:
+        await _native.execute(
+            pool=first_pool,
+            sql="SELECT pg_backend_pid()",
+        )
+        second_pool_rows = await _native.execute(
+            pool=second_pool,
+            sql="SELECT pg_backend_pid()",
+        )
+
+        await _native.close_pool(first_pool)
+
+        with pytest.raises(
+            RuntimeError,
+            match="PostgreSQL pool handle is closed",
+        ):
+            await _native.execute(
+                pool=first_pool,
+                sql="SELECT 1",
+            )
+
+        current_second_pool_rows = await _native.execute(
+            pool=second_pool,
+            sql="SELECT pg_backend_pid()",
+        )
+        assert current_second_pool_rows == second_pool_rows
+    finally:
+        await _native.close_pools()
+
+
+@pytest.mark.asyncio
+async def test_close_pool_before_first_execution(postgres_database_url):
+    pool = _native.create_pool(database_url=postgres_database_url)
+
+    await _native.close_pool(pool)
+
+    with pytest.raises(
+        RuntimeError,
+        match="PostgreSQL pool handle is closed",
+    ):
+        await _native.execute(
+            pool=pool,
+            sql="SELECT 1",
+        )
+
+
+@pytest.mark.asyncio
+async def test_close_pool_is_idempotent(postgres_database_url):
+    pool = _native.create_pool(database_url=postgres_database_url)
+
+    await asyncio.gather(
+        _native.close_pool(pool),
+        _native.close_pool(pool),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="PostgreSQL pool handle is closed",
+    ):
+        await _native.execute(
+            pool=pool,
+            sql="SELECT 1",
+        )
+
+
 @pytest.mark.skipif(
     "fork" not in multiprocessing.get_all_start_methods(),
     reason="fork is not supported",

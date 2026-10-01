@@ -1,6 +1,7 @@
 use crate::error::NativeError;
 use pyo3::prelude::*;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 static NEXT_POOL_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -11,6 +12,7 @@ pub(crate) struct PoolHandle {
     pub(crate) database_url: String,
     pub(crate) max_size: usize,
     pub(crate) wait_timeout_ms: u64,
+    closed: Arc<AtomicBool>,
 }
 
 impl PoolHandle {
@@ -28,6 +30,15 @@ impl PoolHandle {
             database_url,
             max_size,
             wait_timeout_ms,
+            closed: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn mark_closed(&self) {
+        self.closed.store(true, Ordering::Release);
     }
 }

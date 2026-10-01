@@ -16,6 +16,7 @@ pub(crate) enum NativeError {
         type_name: String,
     },
     InvalidPoolMaxSize,
+    PoolHandleClosed,
 }
 
 impl std::fmt::Display for NativeError {
@@ -63,6 +64,9 @@ impl std::fmt::Display for NativeError {
                     formatter,
                     "PostgreSQL pool max size must be greater than zero"
                 )
+            }
+            Self::PoolHandleClosed => {
+                write!(formatter, "PostgreSQL pool handle is closed")
             }
         }
     }
