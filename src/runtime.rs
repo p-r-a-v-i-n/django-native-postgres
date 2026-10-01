@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::OnceLock;
+use std::process;
+use std::sync::{Arc, Mutex as SyncMutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -94,41 +94,57 @@ pub(crate) async fn close_pools() -> Result<(), NativeError> {
 }
 
 // Handle to the command queue owned by the background runtime.
+#[derive(Clone)]
 struct RuntimeService {
+    process_id: u32,
     sender: mpsc::Sender<Command>,
 }
 
 // Shared by all callers in the current process.
-static RUNTIME_SERVICE: OnceLock<RuntimeService> = OnceLock::new();
+static RUNTIME_SERVICE: OnceLock<SyncMutex<Option<RuntimeService>>> = OnceLock::new();
 
 impl RuntimeService {
-    fn start() -> &'static RuntimeService {
-        RUNTIME_SERVICE.get_or_init(|| {
-            // A bounded queue applies backpressure during submission bursts.
-            let (sender, mut receiver) = mpsc::channel::<Command>(32);
+    fn start() -> Self {
+        let process_id = process::id();
+        let service = RUNTIME_SERVICE.get_or_init(|| SyncMutex::new(None));
+        let mut service = service.lock().unwrap_or_else(|error| error.into_inner());
 
-            // Database I/O runs on a dedicated current-thread Tokio runtime.
-            thread::Builder::new()
-                .name("tokio-runtime".to_string())
-                .spawn(move || {
-                    let runtime = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .expect("failed to create Tokio runtime");
+        let needs_new_runtime = match service.as_ref() {
+            Some(service) => service.process_id != process_id,
+            None => true,
+        };
 
-                    runtime.block_on(async move {
-                        let pools = Arc::new(Mutex::new(HashMap::new()));
+        if needs_new_runtime {
+            *service = Some(Self::new(process_id));
+        }
 
-                        while let Some(command) = receiver.recv().await {
-                            // Spawning prevents one request from serializing the command loop.
-                            tokio::spawn(handle_command(command, Arc::clone(&pools)));
-                        }
-                    });
-                })
-                .expect("failed to spawn Tokio runtime thread");
+        service
+            .as_ref()
+            .expect("runtime service must be initialized")
+            .clone()
+    }
+    fn new(process_id: u32) -> Self {
+        let (sender, mut receiver) = mpsc::channel::<Command>(32);
 
-            RuntimeService { sender }
-        })
+        thread::Builder::new()
+            .name("tokio-runtime".to_string())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("failed to create Tokio runtime");
+
+                runtime.block_on(async move {
+                    let pools = Arc::new(Mutex::new(HashMap::new()));
+
+                    while let Some(command) = receiver.recv().await {
+                        tokio::spawn(handle_command(command, Arc::clone(&pools)));
+                    }
+                });
+            })
+            .expect("failed to spawn Tokio runtime thread");
+
+        RuntimeService { process_id, sender }
     }
 }
 

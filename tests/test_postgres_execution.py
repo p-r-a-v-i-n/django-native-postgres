@@ -1,8 +1,26 @@
 import asyncio
+import multiprocessing
 import os
 
 import pytest
 from django_native_postgres import _native
+
+
+async def _get_backend_pid(database_url):
+    rows = await asyncio.wait_for(
+        _native.execute(
+            database_url=database_url,
+            sql="SELECT pg_backend_pid()",
+        ),
+        timeout=5,
+    )
+    return rows[0][0]
+
+
+def _get_backend_pid_in_child(database_url, connection):
+    backend_pid = asyncio.run(_get_backend_pid(database_url))
+    connection.send(backend_pid)
+    connection.close()
 
 
 def test_native_exposes_execute():
@@ -214,3 +232,46 @@ async def test_execute_times_out_when_pool_is_exhausted(postgres_database_url):
     assert len(errors) == 1
     assert isinstance(errors[0], RuntimeError)
     assert "failed to acquire PostgreSQL connection" in str(errors[0])
+
+
+@pytest.mark.skipif(
+    "fork" not in multiprocessing.get_all_start_methods(),
+    reason="fork is not supported",
+)
+@pytest.mark.filterwarnings(
+    "ignore:This process .* is multi-threaded.*:DeprecationWarning",
+)
+def test_pool_is_recreated_after_fork(postgres_database_url):
+    asyncio.run(_native.close_pools())
+    parent_backend_pid = asyncio.run(_get_backend_pid(postgres_database_url))
+
+    context = multiprocessing.get_context("fork")
+    receiver, sender = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_get_backend_pid_in_child,
+        args=(postgres_database_url, sender),
+    )
+
+    try:
+        process.start()
+        sender.close()
+        process.join(timeout=10)
+
+        if process.is_alive():
+            process.kill()
+            process.join()
+
+        assert process.exitcode == 0
+        assert receiver.poll()
+
+        child_backend_pid = receiver.recv()
+        assert child_backend_pid != parent_backend_pid
+
+        current_parent_backend_pid = asyncio.run(
+            _get_backend_pid(postgres_database_url)
+        )
+        assert current_parent_backend_pid == parent_backend_pid
+    finally:
+        receiver.close()
+        sender.close()
+        asyncio.run(_native.close_pools())

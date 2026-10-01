@@ -1,7 +1,20 @@
 import asyncio
+import multiprocessing
 
 import pytest
 from django_native_postgres import _native
+
+
+async def _run_runtime_probe():
+    result = await asyncio.wait_for(
+        _native.runtime_probe(1),
+        timeout=1,
+    )
+    assert result == 1
+
+
+def _run_runtime_probe_in_child():
+    asyncio.run(_run_runtime_probe())
 
 
 @pytest.mark.asyncio
@@ -39,3 +52,25 @@ async def test_runtime_probes_run_concurrently():
     sequential_duration = delay_ms * probe_count / 1_000
     assert results == [delay_ms] * probe_count
     assert elapsed < sequential_duration * 0.75
+
+
+@pytest.mark.skipif(
+    "fork" not in multiprocessing.get_all_start_methods(),
+    reason="fork is not supported",
+)
+@pytest.mark.filterwarnings(
+    "ignore:This process .* is multi-threaded.*:DeprecationWarning",
+)
+def test_runtime_is_recreated_after_fork():
+    asyncio.run(_run_runtime_probe())
+
+    context = multiprocessing.get_context("fork")
+    process = context.Process(target=_run_runtime_probe_in_child)
+    process.start()
+    process.join(timeout=2)
+
+    if process.is_alive():
+        process.kill()
+        process.join()
+
+    assert process.exitcode == 0
