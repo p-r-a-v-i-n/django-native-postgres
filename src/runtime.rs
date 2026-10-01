@@ -6,11 +6,12 @@ use std::time::Duration;
 
 use crate::error::NativeError;
 use crate::parameter::QueryParameter;
+use crate::pool::PoolHandle;
 use crate::postgres::{self, QueryRows};
 use deadpool_postgres::Pool;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
-type PoolRegistry = Arc<Mutex<HashMap<String, Pool>>>;
+type PoolRegistry = Arc<Mutex<HashMap<u64, Pool>>>;
 
 enum Command {
     Probe {
@@ -18,9 +19,7 @@ enum Command {
         response: oneshot::Sender<u64>,
     },
     Execute {
-        database_url: String,
-        pool_max_size: usize,
-        pool_wait_timeout_ms: u64,
+        pool: PoolHandle,
         sql: String,
         params: Vec<QueryParameter>,
         response: oneshot::Sender<Result<QueryRows, NativeError>>,
@@ -49,11 +48,9 @@ pub(crate) async fn probe(delay_ms: u64) -> Result<u64, NativeError> {
 }
 
 pub(crate) async fn execute(
-    database_url: String,
+    pool: PoolHandle,
     sql: String,
     params: Vec<QueryParameter>,
-    pool_max_size: usize,
-    pool_wait_timeout_ms: u64,
 ) -> Result<QueryRows, NativeError> {
     let service = RuntimeService::start();
     let (response_tx, response_rx) = oneshot::channel();
@@ -61,9 +58,7 @@ pub(crate) async fn execute(
     service
         .sender
         .send(Command::Execute {
-            database_url,
-            pool_max_size,
-            pool_wait_timeout_ms,
+            pool,
             sql,
             params,
             response: response_tx,
@@ -150,21 +145,20 @@ impl RuntimeService {
 
 async fn get_or_create_pool(
     pools: &PoolRegistry,
-    database_url: &str,
-    pool_max_size: usize,
-    pool_wait_timeout_ms: u64,
+    handle: &PoolHandle,
 ) -> Result<Pool, NativeError> {
-    if pool_max_size == 0 {
-        return Err(NativeError::InvalidPoolMaxSize);
-    }
     let mut pools = pools.lock().await;
-
-    if let Some(pool) = pools.get(database_url) {
+    if let Some(pool) = pools.get(&handle.id) {
         return Ok(pool.clone());
     }
 
-    let pool = postgres::create_pool(database_url, pool_max_size, pool_wait_timeout_ms)?;
-    pools.insert(database_url.to_string(), pool.clone());
+    let pool = postgres::create_pool(
+        &handle.database_url,
+        handle.max_size,
+        handle.wait_timeout_ms,
+    )?;
+
+    pools.insert(handle.id, pool.clone());
     Ok(pool)
 }
 
@@ -178,21 +172,12 @@ async fn handle_command(command: Command, pools: PoolRegistry) {
             let _ = response.send(delay_ms);
         }
         Command::Execute {
-            database_url,
-            pool_max_size,
-            pool_wait_timeout_ms,
+            pool,
             sql,
             params,
             response,
         } => {
-            let result = match get_or_create_pool(
-                &pools,
-                &database_url,
-                pool_max_size,
-                pool_wait_timeout_ms,
-            )
-            .await
-            {
+            let result = match get_or_create_pool(&pools, &pool).await {
                 Ok(pool) => postgres::execute(&pool, &sql, &params).await,
                 Err(error) => Err(error),
             };

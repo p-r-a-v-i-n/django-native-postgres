@@ -70,9 +70,10 @@ async def test_django_compiled_query_executes_through_rust(
     compiled_book_query,
 ):
     database_url, sql, params = compiled_book_query
+    pool = _native.create_pool(database_url=database_url)
 
     rows = await _native.execute(
-        database_url=database_url,
+        pool=pool,
         sql=sql,
         params=params,
     )

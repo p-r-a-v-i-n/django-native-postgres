@@ -7,6 +7,7 @@ use pyo3::prelude::*;
 mod error;
 mod parameter;
 mod placeholders;
+mod pool;
 mod postgres;
 mod runtime;
 
@@ -20,23 +21,24 @@ async fn runtime_probe(delay_ms: u64) -> PyResult<u64> {
     runtime::probe(delay_ms).await.map_err(to_python_error)
 }
 
-#[pyfunction(signature = (database_url, sql, params=None, pool_max_size=16, pool_wait_timeout_ms=30_000))]
-async fn execute(
+#[pyfunction(signature=(database_url, max_size=16, wait_timeout_ms=30_000))]
+fn create_pool(
     database_url: String,
+    max_size: usize,
+    wait_timeout_ms: u64,
+) -> PyResult<pool::PoolHandle> {
+    pool::PoolHandle::new(database_url, max_size, wait_timeout_ms).map_err(to_python_error)
+}
+
+#[pyfunction(signature = (pool, sql, params=None))]
+async fn execute(
+    pool: Py<pool::PoolHandle>,
     sql: String,
     params: Option<Vec<parameter::QueryParameter>>,
-    pool_max_size: usize,
-    pool_wait_timeout_ms: u64,
 ) -> PyResult<postgres::QueryRows> {
-    runtime::execute(
-        database_url,
-        sql,
-        params.unwrap_or_default(),
-        pool_max_size,
-        pool_wait_timeout_ms,
-    )
-    .await
-    .map_err(to_python_error)
+    runtime::execute(pool.get().clone(), sql, params.unwrap_or_default())
+        .await
+        .map_err(to_python_error)
 }
 
 #[pyfunction]
@@ -46,10 +48,13 @@ async fn close_pools() -> PyResult<()> {
 
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<pool::PoolHandle>()?;
+
     module.add_function(wrap_pyfunction!(build_info, module)?)?;
     module.add_function(wrap_pyfunction!(runtime_probe, module)?)?;
     module.add_function(wrap_pyfunction!(execute, module)?)?;
     module.add_function(wrap_pyfunction!(close_pools, module)?)?;
+    module.add_function(wrap_pyfunction!(create_pool, module)?)?;
     Ok(())
 }
 

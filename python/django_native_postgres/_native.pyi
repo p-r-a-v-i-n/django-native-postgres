@@ -1,12 +1,17 @@
 from collections.abc import Sequence
 
+class PoolHandle: ...
+
 def build_info() -> tuple[str, str]: ...
+def create_pool(
+    database_url: str,
+    max_size: int = 16,
+    wait_timeout_ms: int = 30_000,
+) -> PoolHandle: ...
 async def runtime_probe(delay_ms: int) -> int: ...
 async def close_pools() -> None: ...
 async def execute(
-    database_url: str,
+    pool: PoolHandle,
     sql: str,
     params: Sequence[str | int] | None = None,
-    pool_max_size: int = 16,
-    pool_wait_timeout_ms: int = 30_000,
 ) -> list[list[str | int | None]]: ...
