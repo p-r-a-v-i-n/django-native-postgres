@@ -4,6 +4,7 @@ import os
 
 import pytest
 from django_native_postgres import _native
+from django_native_postgres.executor import NativeExecutor
 
 
 async def _get_backend_pid(pool):
@@ -205,6 +206,42 @@ async def test_transaction_rollback_discards_changes(postgres_database_url):
             transaction=transaction,
             sql="SELECT 1",
         )
+
+
+@pytest.mark.asyncio
+async def test_native_executor_transaction_commits_and_rolls_back(
+    postgres_database_url,
+):
+    executor = NativeExecutor(
+        database_url=postgres_database_url,
+        pool_max_size=1,
+    )
+
+    try:
+        await executor.execute(
+            sql="CREATE TEMP TABLE native_executor_transaction (value BIGINT)",
+        )
+
+        async with executor.transaction() as transaction:
+            await transaction.execute(
+                sql="INSERT INTO native_executor_transaction VALUES (%s)",
+                params=(1,),
+            )
+
+        with pytest.raises(ValueError, match="roll back this transaction"):
+            async with executor.transaction() as transaction:
+                await transaction.execute(
+                    sql="INSERT INTO native_executor_transaction VALUES (%s)",
+                    params=(2,),
+                )
+                raise ValueError("roll back this transaction")
+
+        rows = await executor.execute(
+            sql="SELECT value FROM native_executor_transaction ORDER BY value",
+        )
+        assert rows == [[1]]
+    finally:
+        await executor.close()
 
 
 @pytest.mark.asyncio
