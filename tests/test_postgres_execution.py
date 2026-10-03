@@ -47,6 +47,27 @@ def _get_backend_pid_in_child(pool, connection):
     connection.close()
 
 
+async def _execute_transaction_with_timeout(transaction):
+    return await asyncio.wait_for(
+        _native.execute_transaction(
+            transaction=transaction,
+            sql="SELECT pg_backend_pid()",
+        ),
+        timeout=1,
+    )
+
+
+def _execute_transaction_in_child(transaction, connection):
+    try:
+        rows = asyncio.run(_execute_transaction_with_timeout(transaction))
+    except Exception as error:
+        connection.send((type(error).__name__, str(error)))
+    else:
+        connection.send(("result", rows))
+    finally:
+        connection.close()
+
+
 def test_native_exposes_execute():
     assert callable(_native.execute)
 
@@ -810,6 +831,66 @@ async def test_close_pool_allows_active_query_to_finish(postgres_database_url):
             query.cancel()
             await asyncio.gather(query, return_exceptions=True)
         await _native.close_pools()
+
+
+@pytest.mark.skipif(
+    "fork" not in multiprocessing.get_all_start_methods(),
+    reason="fork is not supported",
+)
+@pytest.mark.filterwarnings(
+    "ignore:This process .* is multi-threaded.*:DeprecationWarning",
+)
+def test_transaction_handle_is_rejected_after_fork(postgres_database_url):
+    asyncio.run(_native.close_pools())
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+    )
+    transaction = asyncio.run(_native.begin_transaction(pool))
+    parent_rows = asyncio.run(
+        _native.execute_transaction(
+            transaction=transaction,
+            sql="SELECT pg_backend_pid()",
+        )
+    )
+
+    context = multiprocessing.get_context("fork")
+    receiver, sender = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_execute_transaction_in_child,
+        args=(transaction, sender),
+    )
+
+    try:
+        process.start()
+        sender.close()
+        process.join(timeout=5)
+
+        if process.is_alive():
+            process.kill()
+            process.join()
+
+        assert process.exitcode == 0
+        assert receiver.poll()
+
+        error_type, message = receiver.recv()
+        assert error_type == "RuntimeError"
+        assert message == (
+            "PostgreSQL transaction handle belongs to a different process"
+        )
+
+        current_parent_rows = asyncio.run(
+            _native.execute_transaction(
+                transaction=transaction,
+                sql="SELECT pg_backend_pid()",
+            )
+        )
+        assert current_parent_rows == parent_rows
+    finally:
+        receiver.close()
+        sender.close()
+        asyncio.run(_native.rollback_transaction(transaction))
+        asyncio.run(_native.close_pools())
 
 
 @pytest.mark.skipif(

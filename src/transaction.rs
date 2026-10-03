@@ -8,6 +8,7 @@ use crate::error::NativeError;
 use crate::parameter::QueryParameter;
 use crate::postgres::{self, QueryRows};
 use deadpool_postgres::{Object, Pool};
+use std::process;
 
 pub(crate) enum TransactionCommand {
     Execute {
@@ -26,13 +27,15 @@ pub(crate) enum TransactionCommand {
 #[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub(crate) struct TransactionHandle {
-    pub(crate) sender: mpsc::Sender<TransactionCommand>,
+    process_id: u32,
+    sender: mpsc::Sender<TransactionCommand>,
     closed: Arc<AtomicBool>,
 }
 
 impl TransactionHandle {
     pub(crate) fn new(sender: mpsc::Sender<TransactionCommand>) -> Self {
         Self {
+            process_id: process::id(),
             sender,
             closed: Arc::new(AtomicBool::new(false)),
         }
@@ -50,6 +53,13 @@ impl TransactionHandle {
         self.closed
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
+    }
+
+    pub(crate) fn validate_process(&self) -> Result<(), NativeError> {
+        if self.process_id != process::id() {
+            return Err(NativeError::TransactionHandleProcessMismatch);
+        }
+        Ok(())
     }
 }
 
@@ -76,6 +86,7 @@ pub(crate) async fn execute(
     sql: String,
     params: Vec<QueryParameter>,
 ) -> Result<QueryRows, NativeError> {
+    handle.validate_process()?;
     if handle.is_closed() {
         return Err(NativeError::TransactionHandleClosed);
     }
@@ -106,6 +117,7 @@ pub(crate) async fn execute(
 }
 
 pub(crate) async fn commit(handle: TransactionHandle) -> Result<(), NativeError> {
+    handle.validate_process()?;
     if !handle.try_mark_closed() {
         return Err(NativeError::TransactionHandleClosed);
     }
@@ -126,6 +138,7 @@ pub(crate) async fn commit(handle: TransactionHandle) -> Result<(), NativeError>
 }
 
 pub(crate) async fn rollback(handle: TransactionHandle) -> Result<(), NativeError> {
+    handle.validate_process()?;
     if !handle.try_mark_closed() {
         return Err(NativeError::TransactionHandleClosed);
     }

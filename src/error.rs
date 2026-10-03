@@ -23,6 +23,7 @@ pub(crate) enum NativeError {
     InvalidPoolWaitTimeout,
     PoolHandleClosed,
     TransactionHandleClosed,
+    TransactionHandleProcessMismatch,
 }
 
 impl std::fmt::Display for NativeError {
@@ -88,6 +89,12 @@ impl std::fmt::Display for NativeError {
             }
             Self::TransactionHandleClosed => {
                 write!(formatter, "PostgreSQL transaction handle is closed")
+            }
+            Self::TransactionHandleProcessMismatch => {
+                write!(
+                    formatter,
+                    "PostgreSQL transaction handle belongs to a different process"
+                )
             }
         }
     }
