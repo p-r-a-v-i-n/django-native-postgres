@@ -89,6 +89,222 @@ async def test_execute_reuses_postgres_connection(postgres_pool):
 
 
 @pytest.mark.asyncio
+async def test_transaction_pins_and_releases_pool_connection(
+    postgres_database_url,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+    )
+    transaction = await _native.begin_transaction(pool)
+
+    first_rows = await _native.execute_transaction(
+        transaction=transaction,
+        sql="SELECT pg_backend_pid()",
+    )
+    second_rows = await _native.execute_transaction(
+        transaction=transaction,
+        sql="SELECT pg_backend_pid()",
+    )
+
+    assert second_rows == first_rows
+
+    await _native.rollback_transaction(transaction)
+
+    pool_rows = await _native.execute(
+        pool=pool,
+        sql="SELECT pg_backend_pid()",
+    )
+    assert pool_rows == first_rows
+
+
+@pytest.mark.asyncio
+async def test_transaction_commit_persists_changes(postgres_database_url):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+    )
+    await _native.execute(
+        pool=pool,
+        sql="CREATE TEMP TABLE native_transaction_commit (value BIGINT)",
+    )
+    transaction = await _native.begin_transaction(pool)
+
+    await _native.execute_transaction(
+        transaction=transaction,
+        sql="INSERT INTO native_transaction_commit VALUES (1)",
+    )
+    await _native.commit_transaction(transaction)
+
+    rows = await _native.execute(
+        pool=pool,
+        sql="SELECT value FROM native_transaction_commit",
+    )
+    assert rows == [[1]]
+
+    with pytest.raises(
+        RuntimeError,
+        match="PostgreSQL transaction handle is closed",
+    ):
+        await _native.execute_transaction(
+            transaction=transaction,
+            sql="SELECT 1",
+        )
+
+
+@pytest.mark.asyncio
+async def test_transaction_rollback_discards_changes(postgres_database_url):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+    )
+    await _native.execute(
+        pool=pool,
+        sql="CREATE TEMP TABLE native_transaction_rollback (value BIGINT)",
+    )
+    transaction = await _native.begin_transaction(pool)
+
+    await _native.execute_transaction(
+        transaction=transaction,
+        sql="INSERT INTO native_transaction_rollback VALUES (1)",
+    )
+    await _native.rollback_transaction(transaction)
+
+    rows = await _native.execute(
+        pool=pool,
+        sql="SELECT value FROM native_transaction_rollback",
+    )
+    assert rows == []
+
+    with pytest.raises(
+        RuntimeError,
+        match="PostgreSQL transaction handle is closed",
+    ):
+        await _native.execute_transaction(
+            transaction=transaction,
+            sql="SELECT 1",
+        )
+
+
+@pytest.mark.asyncio
+async def test_transaction_holds_pool_connection_until_rollback(
+    postgres_database_url,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        wait_timeout_ms=50,
+    )
+    transaction = await _native.begin_transaction(pool)
+
+    with pytest.raises(
+        RuntimeError,
+        match="failed to acquire PostgreSQL connection",
+    ):
+        await _native.execute(
+            pool=pool,
+            sql="SELECT 1",
+        )
+
+    await _native.rollback_transaction(transaction)
+
+    rows = await _native.execute(
+        pool=pool,
+        sql="SELECT 1::BIGINT",
+    )
+    assert rows == [[1]]
+
+
+@pytest.mark.asyncio
+async def test_transaction_can_rollback_after_query_error(
+    postgres_database_url,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+    )
+    transaction = await _native.begin_transaction(pool)
+    transaction_rows = await _native.execute_transaction(
+        transaction=transaction,
+        sql="SELECT pg_backend_pid()",
+    )
+
+    with pytest.raises(RuntimeError, match="PostgreSQL query failed"):
+        await _native.execute_transaction(
+            transaction=transaction,
+            sql="SELECT FROM",
+        )
+
+    await _native.rollback_transaction(transaction)
+
+    pool_rows = await _native.execute(
+        pool=pool,
+        sql="SELECT pg_backend_pid()",
+    )
+    assert pool_rows == transaction_rows
+
+
+@pytest.mark.asyncio
+async def test_transaction_can_only_be_finalized_once(postgres_database_url):
+    pool = _native.create_pool(database_url=postgres_database_url)
+    transaction = await _native.begin_transaction(pool)
+
+    results = await asyncio.gather(
+        _native.commit_transaction(transaction),
+        _native.rollback_transaction(transaction),
+        return_exceptions=True,
+    )
+
+    successes = [result for result in results if result is None]
+    errors = [result for result in results if isinstance(result, Exception)]
+
+    assert len(successes) == 1
+    assert len(errors) == 1
+    assert isinstance(errors[0], RuntimeError)
+    assert "PostgreSQL transaction handle is closed" in str(errors[0])
+
+
+@pytest.mark.asyncio
+async def test_dropping_transaction_rolls_back_and_releases_connection(
+    postgres_database_url,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        wait_timeout_ms=1_000,
+    )
+    await _native.execute(
+        pool=pool,
+        sql="CREATE TEMP TABLE native_transaction_drop (value BIGINT)",
+    )
+    transaction = await _native.begin_transaction(pool)
+    await _native.execute_transaction(
+        transaction=transaction,
+        sql="INSERT INTO native_transaction_drop VALUES (1)",
+    )
+
+    del transaction
+
+    rows = await _native.execute(
+        pool=pool,
+        sql="SELECT value FROM native_transaction_drop",
+    )
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_begin_transaction_rejects_closed_pool(postgres_database_url):
+    pool = _native.create_pool(database_url=postgres_database_url)
+    await _native.close_pool(pool)
+
+    with pytest.raises(
+        RuntimeError,
+        match="PostgreSQL pool handle is closed",
+    ):
+        await _native.begin_transaction(pool)
+
+
+@pytest.mark.asyncio
 async def test_close_pools_releases_postgres_connection(postgres_pool):
     first_rows = await _native.execute(
         pool=postgres_pool,

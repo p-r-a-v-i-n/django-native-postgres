@@ -8,6 +8,7 @@ use crate::error::NativeError;
 use crate::parameter::QueryParameter;
 use crate::pool::PoolHandle;
 use crate::postgres::{self, QueryRows};
+use crate::transaction::{self, TransactionHandle};
 use deadpool_postgres::Pool;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
@@ -23,6 +24,10 @@ enum Command {
         sql: String,
         params: Vec<QueryParameter>,
         response: oneshot::Sender<Result<QueryRows, NativeError>>,
+    },
+    BeginTransaction {
+        pool: PoolHandle,
+        response: oneshot::Sender<Result<TransactionHandle, NativeError>>,
     },
     ClosePools {
         response: oneshot::Sender<()>,
@@ -85,6 +90,24 @@ pub(crate) async fn execute(
             pool,
             sql,
             params,
+            response: response_tx,
+        })
+        .await
+        .map_err(|_| NativeError::CommandChannelClosed)?;
+
+    response_rx
+        .await
+        .map_err(|_| NativeError::ResponseChannelClosed)?
+}
+
+pub(crate) async fn begin_transaction(pool: PoolHandle) -> Result<TransactionHandle, NativeError> {
+    let service = RuntimeService::start();
+    let (response_tx, response_rx) = oneshot::channel();
+
+    service
+        .sender
+        .send(Command::BeginTransaction {
+            pool,
             response: response_tx,
         })
         .await
@@ -217,6 +240,13 @@ async fn handle_command(command: Command, pools: PoolRegistry) {
                 Err(error) => Err(error),
             };
             // Cancellation may drop the receiver before this task completes.
+            let _ = response.send(result);
+        }
+        Command::BeginTransaction { pool, response } => {
+            let result = match get_or_create_pool(&pools, &pool).await {
+                Ok(pool) => transaction::begin(&pool).await,
+                Err(error) => Err(error),
+            };
             let _ = response.send(result);
         }
         Command::ClosePools { response } => {
