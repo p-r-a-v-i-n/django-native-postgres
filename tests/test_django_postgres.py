@@ -91,6 +91,32 @@ async def test_django_connection_executes_compiled_query_through_native_executor
 
 
 @pytest.mark.asyncio
+async def test_django_connection_uses_active_native_transaction(transactional_db):
+    connection = connections["default"]
+    executor = connection.get_async_executor()
+
+    async with executor.transaction():
+        await connection.aexecute(
+            'INSERT INTO "integration_app_book" ("name") VALUES (%s)',
+            ("committed",),
+        )
+
+    with pytest.raises(ValueError, match="roll back this transaction"):
+        async with executor.transaction():
+            await connection.aexecute(
+                'INSERT INTO "integration_app_book" ("name") VALUES (%s)',
+                ("rolled back",),
+            )
+            raise ValueError("roll back this transaction")
+
+    rows = await connection.aexecute(
+        'SELECT "name" FROM "integration_app_book" ORDER BY "name"'
+    )
+
+    assert rows == [["committed"]]
+
+
+@pytest.mark.asyncio
 async def test_django_exists_query_executes_through_native_executor(
     compiled_book_exists_query,
 ):

@@ -6,6 +6,10 @@ pub(crate) enum NativeError {
     PostgresPoolBuild(String),
     PostgresPoolAcquire(String),
     PostgresQuery(tokio_postgres::Error),
+    PostgresTransaction {
+        operation: &'static str,
+        source: tokio_postgres::Error,
+    },
     PostgresDecode {
         column: usize,
         source: tokio_postgres::Error,
@@ -18,6 +22,8 @@ pub(crate) enum NativeError {
     InvalidPoolMaxSize,
     InvalidPoolWaitTimeout,
     PoolHandleClosed,
+    TransactionHandleClosed,
+    TransactionHandleProcessMismatch,
 }
 
 impl std::fmt::Display for NativeError {
@@ -75,6 +81,21 @@ impl std::fmt::Display for NativeError {
             Self::PoolHandleClosed => {
                 write!(formatter, "PostgreSQL pool handle is closed")
             }
+            Self::PostgresTransaction { operation, source } => {
+                write! {
+                    formatter,
+                    "failed to {operation} PostgreSQL transaction: {source}"
+                }
+            }
+            Self::TransactionHandleClosed => {
+                write!(formatter, "PostgreSQL transaction handle is closed")
+            }
+            Self::TransactionHandleProcessMismatch => {
+                write!(
+                    formatter,
+                    "PostgreSQL transaction handle belongs to a different process"
+                )
+            }
         }
     }
 }
@@ -83,7 +104,9 @@ impl std::error::Error for NativeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::PostgresConnect(error) | Self::PostgresQuery(error) => Some(error),
-            Self::PostgresDecode { source, .. } => Some(source),
+            Self::PostgresTransaction { source, .. } | Self::PostgresDecode { source, .. } => {
+                Some(source)
+            }
             Self::PlaceholderCountMismatch(error) => Some(error),
             _ => None,
         }

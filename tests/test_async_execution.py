@@ -1,3 +1,4 @@
+import asyncio
 from unittest import mock
 
 import pytest
@@ -167,3 +168,316 @@ async def test_native_executor_closes_pool_handle():
         await executor.close()
 
     close_pool.assert_awaited_once_with(pool)
+
+
+@pytest.mark.asyncio
+async def test_native_transaction_commits_after_successful_context():
+    pool = object()
+    handle = object()
+    rows = [[42]]
+
+    with (
+        mock.patch(
+            "django_native_postgres.executor._native.create_pool",
+            return_value=pool,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.begin_transaction",
+            new=mock.AsyncMock(return_value=handle),
+            create=True,
+        ) as begin_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.execute_transaction",
+            new=mock.AsyncMock(return_value=rows),
+            create=True,
+        ) as execute_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.commit_transaction",
+            new=mock.AsyncMock(),
+            create=True,
+        ) as commit_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.rollback_transaction",
+            new=mock.AsyncMock(),
+            create=True,
+        ) as rollback_transaction,
+    ):
+        executor = NativeExecutor(database_url="postgresql://example")
+
+        async with executor.transaction() as transaction:
+            result = await transaction.execute(
+                sql="SELECT %s::BIGINT",
+                params=(42,),
+            )
+
+    assert result is rows
+    begin_transaction.assert_awaited_once_with(pool)
+    execute_transaction.assert_awaited_once_with(
+        transaction=handle,
+        sql="SELECT %s::BIGINT",
+        params=(42,),
+    )
+    commit_transaction.assert_awaited_once_with(handle)
+    rollback_transaction.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_native_transaction_rolls_back_after_context_error():
+    pool = object()
+    handle = object()
+    error = ValueError("query processing failed")
+
+    with (
+        mock.patch(
+            "django_native_postgres.executor._native.create_pool",
+            return_value=pool,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.begin_transaction",
+            new=mock.AsyncMock(return_value=handle),
+            create=True,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.commit_transaction",
+            new=mock.AsyncMock(),
+            create=True,
+        ) as commit_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.rollback_transaction",
+            new=mock.AsyncMock(),
+            create=True,
+        ) as rollback_transaction,
+    ):
+        executor = NativeExecutor(database_url="postgresql://example")
+
+        with pytest.raises(ValueError) as raised:
+            async with executor.transaction():
+                raise error
+
+    assert raised.value is error
+    rollback_transaction.assert_awaited_once_with(handle)
+    commit_transaction.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_native_transaction_rejects_execution_outside_context():
+    pool = object()
+    handle = object()
+
+    with (
+        mock.patch(
+            "django_native_postgres.executor._native.create_pool",
+            return_value=pool,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.begin_transaction",
+            new=mock.AsyncMock(return_value=handle),
+            create=True,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.commit_transaction",
+            new=mock.AsyncMock(),
+            create=True,
+        ),
+    ):
+        executor = NativeExecutor(database_url="postgresql://example")
+        transaction = executor.transaction()
+
+        with pytest.raises(RuntimeError, match="Native transaction is not active"):
+            await transaction.execute(sql="SELECT 1")
+
+        async with transaction:
+            pass
+
+        with pytest.raises(RuntimeError, match="Native transaction is not active"):
+            await transaction.execute(sql="SELECT 1")
+
+
+@pytest.mark.asyncio
+async def test_executor_routes_queries_through_active_transaction():
+    pool = object()
+    handle = object()
+    transaction_rows = [["transaction"]]
+    pool_rows = [["pool"]]
+
+    with (
+        mock.patch(
+            "django_native_postgres.executor._native.create_pool",
+            return_value=pool,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.begin_transaction",
+            new=mock.AsyncMock(return_value=handle),
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.execute_transaction",
+            new=mock.AsyncMock(return_value=transaction_rows),
+        ) as execute_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.execute",
+            new=mock.AsyncMock(return_value=pool_rows),
+        ) as execute,
+        mock.patch(
+            "django_native_postgres.executor._native.commit_transaction",
+            new=mock.AsyncMock(),
+        ),
+    ):
+        executor = NativeExecutor(database_url="postgresql://example")
+
+        async with executor.transaction():
+            active_rows = await executor.execute(sql="SELECT 'transaction'")
+
+        inactive_rows = await executor.execute(sql="SELECT 'pool'")
+
+    assert active_rows is transaction_rows
+    assert inactive_rows is pool_rows
+    execute_transaction.assert_awaited_once_with(
+        transaction=handle,
+        sql="SELECT 'transaction'",
+        params=None,
+    )
+    execute.assert_awaited_once_with(
+        pool=pool,
+        sql="SELECT 'pool'",
+        params=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_executor_keeps_transaction_isolated_between_tasks():
+    pool = object()
+    handle = object()
+    transaction_started = asyncio.Event()
+    pool_query_finished = asyncio.Event()
+
+    with (
+        mock.patch(
+            "django_native_postgres.executor._native.create_pool",
+            return_value=pool,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.begin_transaction",
+            new=mock.AsyncMock(return_value=handle),
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.execute_transaction",
+            new=mock.AsyncMock(return_value=[["transaction"]]),
+        ) as execute_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.execute",
+            new=mock.AsyncMock(return_value=[["pool"]]),
+        ) as execute,
+        mock.patch(
+            "django_native_postgres.executor._native.commit_transaction",
+            new=mock.AsyncMock(),
+        ),
+    ):
+        executor = NativeExecutor(database_url="postgresql://example")
+
+        async def execute_inside_transaction():
+            async with executor.transaction():
+                transaction_started.set()
+                await pool_query_finished.wait()
+                return await executor.execute(sql="SELECT 'transaction'")
+
+        async def execute_outside_transaction():
+            await transaction_started.wait()
+            rows = await executor.execute(sql="SELECT 'pool'")
+            pool_query_finished.set()
+            return rows
+
+        transaction_rows, pool_rows = await asyncio.gather(
+            execute_inside_transaction(),
+            execute_outside_transaction(),
+        )
+
+    assert transaction_rows == [["transaction"]]
+    assert pool_rows == [["pool"]]
+    execute_transaction.assert_awaited_once_with(
+        transaction=handle,
+        sql="SELECT 'transaction'",
+        params=None,
+    )
+    execute.assert_awaited_once_with(
+        pool=pool,
+        sql="SELECT 'pool'",
+        params=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_executor_rejects_nested_transactions():
+    pool = object()
+    handle = object()
+
+    with (
+        mock.patch(
+            "django_native_postgres.executor._native.create_pool",
+            return_value=pool,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.begin_transaction",
+            new=mock.AsyncMock(return_value=handle),
+        ) as begin_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.commit_transaction",
+            new=mock.AsyncMock(),
+        ) as commit_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.rollback_transaction",
+            new=mock.AsyncMock(),
+        ) as rollback_transaction,
+    ):
+        executor = NativeExecutor(database_url="postgresql://example")
+
+        async with executor.transaction():
+            with pytest.raises(
+                RuntimeError,
+                match="Nested native transactions are not supported",
+            ):
+                async with executor.transaction():
+                    pass
+
+    begin_transaction.assert_awaited_once_with(pool)
+    commit_transaction.assert_awaited_once_with(handle)
+    rollback_transaction.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_executor_restores_context_after_commit_error():
+    pool = object()
+    handle = object()
+    pool_rows = [["pool"]]
+
+    with (
+        mock.patch(
+            "django_native_postgres.executor._native.create_pool",
+            return_value=pool,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.begin_transaction",
+            new=mock.AsyncMock(return_value=handle),
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.commit_transaction",
+            new=mock.AsyncMock(side_effect=RuntimeError("commit failed")),
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.execute",
+            new=mock.AsyncMock(return_value=pool_rows),
+        ) as execute,
+    ):
+        executor = NativeExecutor(database_url="postgresql://example")
+
+        with pytest.raises(RuntimeError, match="commit failed"):
+            async with executor.transaction():
+                pass
+
+        rows = await executor.execute(sql="SELECT 'pool'")
+
+    assert rows is pool_rows
+    execute.assert_awaited_once_with(
+        pool=pool,
+        sql="SELECT 'pool'",
+        params=None,
+    )
