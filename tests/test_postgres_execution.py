@@ -305,6 +305,57 @@ async def test_begin_transaction_rejects_closed_pool(postgres_database_url):
 
 
 @pytest.mark.asyncio
+async def test_close_pool_allows_active_transaction_to_finish(
+    postgres_database_url,
+):
+    target_pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+    )
+    observer_pool = _native.create_pool(database_url=postgres_database_url)
+
+    try:
+        transaction = await _native.begin_transaction(target_pool)
+        first_rows = await _native.execute_transaction(
+            transaction=transaction,
+            sql="SELECT pg_backend_pid()",
+        )
+        backend_pid = first_rows[0][0]
+
+        await _native.close_pool(target_pool)
+
+        second_rows = await _native.execute_transaction(
+            transaction=transaction,
+            sql="SELECT pg_backend_pid()",
+        )
+        assert second_rows == first_rows
+
+        with pytest.raises(
+            RuntimeError,
+            match="PostgreSQL pool handle is closed",
+        ):
+            await _native.execute(
+                pool=target_pool,
+                sql="SELECT 1",
+            )
+
+        await _native.commit_transaction(transaction)
+
+        await _wait_for_backend_count(
+            observer_pool,
+            """
+                SELECT COUNT(*)::BIGINT
+                FROM pg_stat_activity
+                WHERE pid = %s
+            """,
+            backend_pid,
+            0,
+        )
+    finally:
+        await _native.close_pools()
+
+
+@pytest.mark.asyncio
 async def test_close_pools_releases_postgres_connection(postgres_pool):
     first_rows = await _native.execute(
         pool=postgres_pool,
