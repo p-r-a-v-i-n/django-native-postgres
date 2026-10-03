@@ -222,15 +222,15 @@ async def test_native_executor_transaction_commits_and_rolls_back(
             sql="CREATE TEMP TABLE native_executor_transaction (value BIGINT)",
         )
 
-        async with executor.transaction() as transaction:
-            await transaction.execute(
+        async with executor.transaction():
+            await executor.execute(
                 sql="INSERT INTO native_executor_transaction VALUES (%s)",
                 params=(1,),
             )
 
         with pytest.raises(ValueError, match="roll back this transaction"):
-            async with executor.transaction() as transaction:
-                await transaction.execute(
+            async with executor.transaction():
+                await executor.execute(
                     sql="INSERT INTO native_executor_transaction VALUES (%s)",
                     params=(2,),
                 )
