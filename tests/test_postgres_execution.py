@@ -245,6 +245,195 @@ async def test_native_executor_transaction_commits_and_rolls_back(
 
 
 @pytest.mark.asyncio
+async def test_nested_transaction_rolls_back_to_savepoint(postgres_database_url):
+    executor = NativeExecutor(
+        database_url=postgres_database_url,
+        pool_max_size=1,
+    )
+
+    try:
+        await executor.execute(
+            sql="CREATE TEMP TABLE native_savepoint (value BIGINT)",
+        )
+
+        async with executor.transaction():
+            await executor.execute(
+                sql="INSERT INTO native_savepoint VALUES (%s)",
+                params=(1,),
+            )
+
+            with pytest.raises(ValueError, match="roll back this savepoint"):
+                async with executor.transaction():
+                    await executor.execute(
+                        sql="INSERT INTO native_savepoint VALUES (%s)",
+                        params=(2,),
+                    )
+                    raise ValueError("roll back this savepoint")
+
+            await executor.execute(
+                sql="INSERT INTO native_savepoint VALUES (%s)",
+                params=(3,),
+            )
+
+        rows = await executor.execute(
+            sql="SELECT value FROM native_savepoint ORDER BY value",
+        )
+        assert rows == [[1], [3]]
+    finally:
+        await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_released_savepoint_rolls_back_with_outer_transaction(
+    postgres_database_url,
+):
+    executor = NativeExecutor(
+        database_url=postgres_database_url,
+        pool_max_size=1,
+    )
+
+    try:
+        await executor.execute(
+            sql="CREATE TEMP TABLE released_savepoint (value BIGINT)",
+        )
+
+        with pytest.raises(ValueError, match="roll back outer transaction"):
+            async with executor.transaction():
+                async with executor.transaction():
+                    await executor.execute(
+                        sql="INSERT INTO released_savepoint VALUES (%s)",
+                        params=(1,),
+                    )
+
+                raise ValueError("roll back outer transaction")
+
+        rows = await executor.execute(
+            sql="SELECT value FROM released_savepoint",
+        )
+        assert rows == []
+    finally:
+        await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_savepoint_recovers_after_postgres_error(postgres_database_url):
+    executor = NativeExecutor(
+        database_url=postgres_database_url,
+        pool_max_size=1,
+    )
+
+    try:
+        await executor.execute(
+            sql="CREATE TEMP TABLE savepoint_error (value BIGINT UNIQUE)",
+        )
+
+        async with executor.transaction():
+            await executor.execute(
+                sql="INSERT INTO savepoint_error VALUES (%s)",
+                params=(1,),
+            )
+
+            with pytest.raises(RuntimeError, match="PostgreSQL query failed"):
+                async with executor.transaction():
+                    await executor.execute(
+                        sql="INSERT INTO savepoint_error VALUES (%s)",
+                        params=(1,),
+                    )
+
+            await executor.execute(
+                sql="INSERT INTO savepoint_error VALUES (%s)",
+                params=(2,),
+            )
+
+        rows = await executor.execute(
+            sql="SELECT value FROM savepoint_error ORDER BY value",
+        )
+        assert rows == [[1], [2]]
+    finally:
+        await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_savepoint_recovers_when_postgres_error_is_caught_inside_context(
+    postgres_database_url,
+):
+    executor = NativeExecutor(
+        database_url=postgres_database_url,
+        pool_max_size=1,
+    )
+
+    try:
+        await executor.execute(
+            sql="CREATE TEMP TABLE caught_savepoint_error (value BIGINT UNIQUE)",
+        )
+
+        async with executor.transaction():
+            await executor.execute(
+                sql="INSERT INTO caught_savepoint_error VALUES (%s)",
+                params=(1,),
+            )
+
+            async with executor.transaction():
+                with pytest.raises(RuntimeError, match="PostgreSQL query failed"):
+                    await executor.execute(
+                        sql="INSERT INTO caught_savepoint_error VALUES (%s)",
+                        params=(1,),
+                    )
+
+            await executor.execute(
+                sql="INSERT INTO caught_savepoint_error VALUES (%s)",
+                params=(2,),
+            )
+
+        rows = await executor.execute(
+            sql="SELECT value FROM caught_savepoint_error ORDER BY value",
+        )
+        assert rows == [[1], [2]]
+    finally:
+        await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_deepest_savepoint_rolls_back_independently(postgres_database_url):
+    executor = NativeExecutor(
+        database_url=postgres_database_url,
+        pool_max_size=1,
+    )
+
+    try:
+        await executor.execute(
+            sql="CREATE TEMP TABLE nested_savepoints (value BIGINT)",
+        )
+
+        async with executor.transaction():
+            async with executor.transaction():
+                await executor.execute(
+                    sql="INSERT INTO nested_savepoints VALUES (%s)",
+                    params=(1,),
+                )
+
+                with pytest.raises(ValueError, match="roll back deepest savepoint"):
+                    async with executor.transaction():
+                        await executor.execute(
+                            sql="INSERT INTO nested_savepoints VALUES (%s)",
+                            params=(2,),
+                        )
+                        raise ValueError("roll back deepest savepoint")
+
+                await executor.execute(
+                    sql="INSERT INTO nested_savepoints VALUES (%s)",
+                    params=(3,),
+                )
+
+        rows = await executor.execute(
+            sql="SELECT value FROM nested_savepoints ORDER BY value",
+        )
+        assert rows == [[1], [3]]
+    finally:
+        await executor.close()
+
+
+@pytest.mark.asyncio
 async def test_transaction_holds_pool_connection_until_rollback(
     postgres_database_url,
 ):
