@@ -1059,6 +1059,224 @@ async def test_close_pool_allows_active_query_to_finish(postgres_database_url):
         await _native.close_pools()
 
 
+@pytest.mark.asyncio
+async def test_cancelling_query_releases_pool_connection(postgres_database_url):
+    target_pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        wait_timeout_ms=1_000,
+    )
+    observer_pool = _native.create_pool(database_url=postgres_database_url)
+    lock_id = os.getpid()
+    query = None
+
+    try:
+        await _native.execute(
+            pool=observer_pool,
+            sql="SELECT 1::BIGINT FROM pg_advisory_lock(%s)",
+            params=(lock_id,),
+        )
+        target_backend_pid = await _get_backend_pid(target_pool)
+        query = asyncio.create_task(
+            _native.execute(
+                pool=target_pool,
+                sql="SELECT pg_backend_pid() FROM pg_advisory_lock(%s)",
+                params=(lock_id,),
+            )
+        )
+
+        await _wait_for_backend_count(
+            observer_pool,
+            """
+                SELECT COUNT(*)::BIGINT
+                FROM pg_stat_activity
+                WHERE pid = %s AND wait_event_type = 'Lock'
+            """,
+            target_backend_pid,
+            1,
+        )
+
+        query.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await query
+
+        rows = await _native.execute(
+            pool=target_pool,
+            sql="SELECT pg_backend_pid()",
+        )
+        assert rows == [[target_backend_pid]]
+    finally:
+        await _native.execute(
+            pool=observer_pool,
+            sql="SELECT 1::BIGINT FROM pg_advisory_unlock(%s)",
+            params=(lock_id,),
+        )
+        if query is not None and not query.done():
+            await asyncio.gather(query, return_exceptions=True)
+        await _native.close_pool(target_pool)
+        await _native.close_pool(observer_pool)
+
+
+@pytest.mark.asyncio
+async def test_cancelling_query_waiting_for_pool_does_not_execute(
+    postgres_database_url,
+):
+    target_pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        wait_timeout_ms=1_000,
+    )
+    observer_pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+    )
+    lock_id = os.getpid()
+    blocked_query = None
+    queued_query = None
+
+    try:
+        await _native.execute(
+            pool=target_pool,
+            sql="CREATE TEMP TABLE cancelled_pool_query (value BIGINT)",
+        )
+        await _native.execute(
+            pool=observer_pool,
+            sql="SELECT 1::BIGINT FROM pg_advisory_lock(%s)",
+            params=(lock_id,),
+        )
+        target_backend_pid = await _get_backend_pid(target_pool)
+        blocked_query = asyncio.create_task(
+            _native.execute(
+                pool=target_pool,
+                sql="SELECT 1::BIGINT FROM pg_advisory_lock(%s)",
+                params=(lock_id,),
+            )
+        )
+
+        await _wait_for_backend_count(
+            observer_pool,
+            """
+                SELECT COUNT(*)::BIGINT
+                FROM pg_stat_activity
+                WHERE pid = %s AND wait_event_type = 'Lock'
+            """,
+            target_backend_pid,
+            1,
+        )
+
+        queued_query = asyncio.create_task(
+            _native.execute(
+                pool=target_pool,
+                sql="INSERT INTO cancelled_pool_query VALUES (1)",
+            )
+        )
+        await asyncio.sleep(0)
+
+        queued_query.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await queued_query
+
+        await _native.execute(
+            pool=observer_pool,
+            sql="SELECT 1::BIGINT FROM pg_advisory_unlock(%s)",
+            params=(lock_id,),
+        )
+        await asyncio.wait_for(blocked_query, timeout=1)
+
+        rows = await _native.execute(
+            pool=target_pool,
+            sql="SELECT value FROM cancelled_pool_query",
+        )
+        assert rows == []
+    finally:
+        await _native.execute(
+            pool=observer_pool,
+            sql="SELECT 1::BIGINT FROM pg_advisory_unlock(%s)",
+            params=(lock_id,),
+        )
+        for query in (blocked_query, queued_query):
+            if query is not None and not query.done():
+                query.cancel()
+                await asyncio.gather(query, return_exceptions=True)
+        await _native.close_pool(target_pool)
+        await _native.close_pool(observer_pool)
+
+
+@pytest.mark.asyncio
+async def test_cancelling_transaction_query_releases_connection(
+    postgres_database_url,
+):
+    executor = NativeExecutor(
+        database_url=postgres_database_url,
+        pool_max_size=1,
+        pool_wait_timeout_ms=1_000,
+    )
+    observer_pool = _native.create_pool(database_url=postgres_database_url)
+    lock_id = os.getpid()
+    transaction_started = asyncio.get_running_loop().create_future()
+    transaction_task = None
+
+    async def execute_blocked_transaction():
+        async with executor.transaction():
+            rows = await executor.execute(sql="SELECT pg_backend_pid()")
+            transaction_started.set_result(rows[0][0])
+            await executor.execute(
+                sql="INSERT INTO cancelled_transaction VALUES (1)",
+            )
+            await executor.execute(
+                sql="SELECT 1::BIGINT FROM pg_advisory_lock(%s)",
+                params=(lock_id,),
+            )
+
+    try:
+        await executor.execute(
+            sql="CREATE TEMP TABLE cancelled_transaction (value BIGINT)",
+        )
+        await _native.execute(
+            pool=observer_pool,
+            sql="SELECT 1::BIGINT FROM pg_advisory_lock(%s)",
+            params=(lock_id,),
+        )
+        transaction_task = asyncio.create_task(execute_blocked_transaction())
+        target_backend_pid = await transaction_started
+
+        await _wait_for_backend_count(
+            observer_pool,
+            """
+                SELECT COUNT(*)::BIGINT
+                FROM pg_stat_activity
+                WHERE pid = %s AND wait_event_type = 'Lock'
+            """,
+            target_backend_pid,
+            1,
+        )
+
+        transaction_task.cancel()
+        done, _ = await asyncio.wait({transaction_task}, timeout=1)
+
+        assert transaction_task in done
+        with pytest.raises(asyncio.CancelledError):
+            transaction_task.result()
+
+        rows = await executor.execute(sql="SELECT pg_backend_pid()")
+        assert rows == [[target_backend_pid]]
+
+        rows = await executor.execute(
+            sql="SELECT value FROM cancelled_transaction",
+        )
+        assert rows == []
+    finally:
+        await _native.execute(
+            pool=observer_pool,
+            sql="SELECT 1::BIGINT FROM pg_advisory_unlock(%s)",
+            params=(lock_id,),
+        )
+        if transaction_task is not None and not transaction_task.done():
+            await asyncio.gather(transaction_task, return_exceptions=True)
+        await executor.close()
+        await _native.close_pool(observer_pool)
+
+
 @pytest.mark.skipif(
     "fork" not in multiprocessing.get_all_start_methods(),
     reason="fork is not supported",

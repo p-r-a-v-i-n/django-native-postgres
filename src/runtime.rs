@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex as SyncMutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
+use crate::cancellation::CancellationGuard;
 use crate::error::NativeError;
 use crate::parameter::QueryParameter;
 use crate::pool::PoolHandle;
@@ -23,6 +24,7 @@ enum Command {
         pool: PoolHandle,
         sql: String,
         params: Vec<QueryParameter>,
+        cancellation: oneshot::Receiver<()>,
         response: oneshot::Sender<Result<QueryRows, NativeError>>,
     },
     BeginTransaction {
@@ -81,6 +83,7 @@ pub(crate) async fn execute(
     sql: String,
     params: Vec<QueryParameter>,
 ) -> Result<QueryRows, NativeError> {
+    let (mut cancellation_guard, cancellation) = CancellationGuard::new();
     let service = RuntimeService::start();
     let (response_tx, response_rx) = oneshot::channel();
 
@@ -90,14 +93,16 @@ pub(crate) async fn execute(
             pool,
             sql,
             params,
+            cancellation,
             response: response_tx,
         })
         .await
         .map_err(|_| NativeError::CommandChannelClosed)?;
 
-    response_rx
-        .await
-        .map_err(|_| NativeError::ResponseChannelClosed)?
+    let response = response_rx.await;
+    cancellation_guard.disarm();
+
+    response.map_err(|_| NativeError::ResponseChannelClosed)?
 }
 
 pub(crate) async fn begin_transaction(pool: PoolHandle) -> Result<TransactionHandle, NativeError> {
@@ -233,10 +238,11 @@ async fn handle_command(command: Command, pools: PoolRegistry) {
             pool,
             sql,
             params,
+            mut cancellation,
             response,
         } => {
             let result = match get_or_create_pool(&pools, &pool).await {
-                Ok(pool) => postgres::execute(&pool, &sql, &params).await,
+                Ok(pool) => postgres::execute(&pool, &sql, &params, &mut cancellation).await,
                 Err(error) => Err(error),
             };
             // Cancellation may drop the receiver before this task completes.
