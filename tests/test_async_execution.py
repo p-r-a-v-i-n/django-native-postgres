@@ -406,7 +406,7 @@ async def test_executor_keeps_transaction_isolated_between_tasks():
 
 
 @pytest.mark.asyncio
-async def test_executor_rejects_nested_transactions():
+async def test_executor_uses_savepoint_for_nested_transaction():
     pool = object()
     handle = object()
 
@@ -420,6 +420,10 @@ async def test_executor_rejects_nested_transactions():
             new=mock.AsyncMock(return_value=handle),
         ) as begin_transaction,
         mock.patch(
+            "django_native_postgres.executor._native.execute_transaction",
+            new=mock.AsyncMock(return_value=[]),
+        ) as execute_transaction,
+        mock.patch(
             "django_native_postgres.executor._native.commit_transaction",
             new=mock.AsyncMock(),
         ) as commit_transaction,
@@ -431,16 +435,347 @@ async def test_executor_rejects_nested_transactions():
         executor = NativeExecutor(database_url="postgresql://example")
 
         async with executor.transaction():
-            with pytest.raises(
-                RuntimeError,
-                match="Nested native transactions are not supported",
-            ):
+            async with executor.transaction():
+                await executor.execute(sql="SELECT 1")
+
+    begin_transaction.assert_awaited_once_with(pool)
+    assert execute_transaction.await_args_list == [
+        mock.call(
+            transaction=handle,
+            sql="SAVEPOINT django_native_postgres_savepoint_1",
+            params=None,
+        ),
+        mock.call(
+            transaction=handle,
+            sql="SELECT 1",
+            params=None,
+        ),
+        mock.call(
+            transaction=handle,
+            sql="RELEASE SAVEPOINT django_native_postgres_savepoint_1",
+            params=None,
+        ),
+    ]
+    commit_transaction.assert_awaited_once_with(handle)
+    rollback_transaction.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_executor_rejects_transaction_use_from_child_tasks():
+    pool = object()
+    handle = object()
+
+    with (
+        mock.patch(
+            "django_native_postgres.executor._native.create_pool",
+            return_value=pool,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.begin_transaction",
+            new=mock.AsyncMock(return_value=handle),
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.execute_transaction",
+            new=mock.AsyncMock(return_value=[]),
+        ) as execute_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.commit_transaction",
+            new=mock.AsyncMock(),
+        ),
+    ):
+        executor = NativeExecutor(database_url="postgresql://example")
+
+        async def execute_query():
+            return await executor.execute(sql="SELECT 1")
+
+        async def open_savepoint():
+            async with executor.transaction():
+                pass
+
+        async with executor.transaction():
+            query_task = asyncio.create_task(execute_query())
+            savepoint_task = asyncio.create_task(open_savepoint())
+            results = await asyncio.gather(
+                query_task,
+                savepoint_task,
+                return_exceptions=True,
+            )
+
+    for result in results:
+        assert isinstance(result, RuntimeError)
+        assert str(result) == (
+            "Native transaction cannot be used from a different asyncio task"
+        )
+
+    execute_transaction.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_executor_marks_transaction_for_rollback_after_savepoint_creation_error():
+    pool = object()
+    handle = object()
+
+    with (
+        mock.patch(
+            "django_native_postgres.executor._native.create_pool",
+            return_value=pool,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.begin_transaction",
+            new=mock.AsyncMock(return_value=handle),
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.execute_transaction",
+            new=mock.AsyncMock(side_effect=RuntimeError("savepoint failed")),
+        ) as execute_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.commit_transaction",
+            new=mock.AsyncMock(),
+        ) as commit_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.rollback_transaction",
+            new=mock.AsyncMock(),
+        ) as rollback_transaction,
+    ):
+        executor = NativeExecutor(database_url="postgresql://example")
+
+        async with executor.transaction():
+            with pytest.raises(RuntimeError, match="savepoint failed"):
                 async with executor.transaction():
                     pass
 
-    begin_transaction.assert_awaited_once_with(pool)
-    commit_transaction.assert_awaited_once_with(handle)
-    rollback_transaction.assert_not_awaited()
+            with pytest.raises(
+                RuntimeError,
+                match="Native transaction is marked for rollback",
+            ):
+                await executor.execute(sql="SELECT 'outer'")
+
+    assert execute_transaction.await_args_list == [
+        mock.call(
+            transaction=handle,
+            sql="SAVEPOINT django_native_postgres_savepoint_1",
+            params=None,
+        )
+    ]
+    commit_transaction.assert_not_awaited()
+    rollback_transaction.assert_awaited_once_with(handle)
+
+
+@pytest.mark.asyncio
+async def test_executor_rolls_back_outer_transaction_after_savepoint_release_error():
+    pool = object()
+    handle = object()
+    pool_rows = [["pool"]]
+
+    with (
+        mock.patch(
+            "django_native_postgres.executor._native.create_pool",
+            return_value=pool,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.begin_transaction",
+            new=mock.AsyncMock(return_value=handle),
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.execute_transaction",
+            new=mock.AsyncMock(side_effect=[[], RuntimeError("release failed")]),
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.execute",
+            new=mock.AsyncMock(return_value=pool_rows),
+        ) as execute,
+        mock.patch(
+            "django_native_postgres.executor._native.commit_transaction",
+            new=mock.AsyncMock(),
+        ) as commit_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.rollback_transaction",
+            new=mock.AsyncMock(),
+        ) as rollback_transaction,
+    ):
+        executor = NativeExecutor(database_url="postgresql://example")
+
+        async with executor.transaction():
+            with pytest.raises(RuntimeError, match="release failed"):
+                async with executor.transaction():
+                    pass
+
+            with pytest.raises(
+                RuntimeError,
+                match="Native transaction is marked for rollback",
+            ):
+                await executor.execute(sql="SELECT 'transaction'")
+
+        rows = await executor.execute(sql="SELECT 'pool'")
+
+    assert rows is pool_rows
+    commit_transaction.assert_not_awaited()
+    rollback_transaction.assert_awaited_once_with(handle)
+    execute.assert_awaited_once_with(
+        pool=pool,
+        sql="SELECT 'pool'",
+        params=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_executor_rolls_back_outer_transaction_after_savepoint_rollback_error():
+    pool = object()
+    handle = object()
+
+    with (
+        mock.patch(
+            "django_native_postgres.executor._native.create_pool",
+            return_value=pool,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.begin_transaction",
+            new=mock.AsyncMock(return_value=handle),
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.execute_transaction",
+            new=mock.AsyncMock(
+                side_effect=[[], RuntimeError("savepoint rollback failed")]
+            ),
+        ) as execute_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.commit_transaction",
+            new=mock.AsyncMock(),
+        ) as commit_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.rollback_transaction",
+            new=mock.AsyncMock(),
+        ) as rollback_transaction,
+    ):
+        executor = NativeExecutor(database_url="postgresql://example")
+
+        async with executor.transaction():
+            with pytest.raises(RuntimeError, match="savepoint rollback failed"):
+                async with executor.transaction():
+                    raise ValueError("application failed")
+
+    assert execute_transaction.await_args_list == [
+        mock.call(
+            transaction=handle,
+            sql="SAVEPOINT django_native_postgres_savepoint_1",
+            params=None,
+        ),
+        mock.call(
+            transaction=handle,
+            sql="ROLLBACK TO SAVEPOINT django_native_postgres_savepoint_1",
+            params=None,
+        ),
+    ]
+    commit_transaction.assert_not_awaited()
+    rollback_transaction.assert_awaited_once_with(handle)
+
+
+@pytest.mark.asyncio
+async def test_executor_rolls_back_savepoint_and_transaction_after_cancellation():
+    pool = object()
+    handle = object()
+    transaction_started = asyncio.Event()
+    wait_forever = asyncio.Event()
+
+    with (
+        mock.patch(
+            "django_native_postgres.executor._native.create_pool",
+            return_value=pool,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.begin_transaction",
+            new=mock.AsyncMock(return_value=handle),
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.execute_transaction",
+            new=mock.AsyncMock(return_value=[]),
+        ) as execute_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.commit_transaction",
+            new=mock.AsyncMock(),
+        ) as commit_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.rollback_transaction",
+            new=mock.AsyncMock(),
+        ) as rollback_transaction,
+    ):
+        executor = NativeExecutor(database_url="postgresql://example")
+
+        async def execute_transaction_until_cancelled():
+            async with executor.transaction():
+                async with executor.transaction():
+                    transaction_started.set()
+                    await wait_forever.wait()
+
+        task = asyncio.create_task(execute_transaction_until_cancelled())
+        await transaction_started.wait()
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert execute_transaction.await_args_list == [
+        mock.call(
+            transaction=handle,
+            sql="SAVEPOINT django_native_postgres_savepoint_1",
+            params=None,
+        ),
+        mock.call(
+            transaction=handle,
+            sql="ROLLBACK TO SAVEPOINT django_native_postgres_savepoint_1",
+            params=None,
+        ),
+        mock.call(
+            transaction=handle,
+            sql="RELEASE SAVEPOINT django_native_postgres_savepoint_1",
+            params=None,
+        ),
+    ]
+    commit_transaction.assert_not_awaited()
+    rollback_transaction.assert_awaited_once_with(handle)
+
+
+@pytest.mark.asyncio
+async def test_executor_rolls_back_transaction_after_caught_query_error():
+    pool = object()
+    handle = object()
+
+    with (
+        mock.patch(
+            "django_native_postgres.executor._native.create_pool",
+            return_value=pool,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.begin_transaction",
+            new=mock.AsyncMock(return_value=handle),
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.execute_transaction",
+            new=mock.AsyncMock(side_effect=RuntimeError("query failed")),
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.commit_transaction",
+            new=mock.AsyncMock(),
+        ) as commit_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.rollback_transaction",
+            new=mock.AsyncMock(),
+        ) as rollback_transaction,
+    ):
+        executor = NativeExecutor(database_url="postgresql://example")
+
+        async with executor.transaction():
+            with pytest.raises(RuntimeError, match="query failed"):
+                await executor.execute(sql="SELECT invalid")
+
+            with pytest.raises(
+                RuntimeError,
+                match="Native transaction is marked for rollback",
+            ):
+                await executor.execute(sql="SELECT 1")
+
+    commit_transaction.assert_not_awaited()
+    rollback_transaction.assert_awaited_once_with(handle)
 
 
 @pytest.mark.asyncio
