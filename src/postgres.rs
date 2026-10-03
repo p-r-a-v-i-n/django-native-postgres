@@ -4,9 +4,9 @@ use crate::placeholders::rewrite_django_placeholders;
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod};
 use pyo3::prelude::*;
 use std::time::Duration;
-use tokio_postgres::NoTls;
 use tokio_postgres::error::Severity;
 use tokio_postgres::types::{ToSql, Type};
+use tokio_postgres::{GenericClient, NoTls};
 
 #[derive(Debug, IntoPyObject)]
 pub(crate) enum QueryValue {
@@ -41,16 +41,14 @@ pub(crate) fn create_pool(
         .map_err(|error| NativeError::PostgresPoolBuild(error.to_string()))
 }
 
-pub(crate) async fn execute(
-    pool: &Pool,
+pub(crate) async fn execute_on_client<C>(
+    client: &C,
     sql: &str,
     params: &[QueryParameter],
-) -> Result<QueryRows, NativeError> {
-    let client = pool
-        .get()
-        .await
-        .map_err(|error| NativeError::PostgresPoolAcquire(error.to_string()))?;
-
+) -> Result<QueryRows, NativeError>
+where
+    C: GenericClient + Sync,
+{
     let postgres_params: Vec<(&(dyn ToSql + Sync), Type)> = params
         .iter()
         .map(|parameter| (parameter.as_postgres(), parameter.postgres_type()))
@@ -58,25 +56,10 @@ pub(crate) async fn execute(
 
     let postgres_sql = rewrite_django_placeholders(sql, params.len())?;
 
-    let rows = match client
+    let rows = client
         .query_typed(postgres_sql.as_str(), &postgres_params)
         .await
-    {
-        Ok(rows) => rows,
-        Err(error) => {
-            let connection_can_be_reused = !client.is_closed()
-                && error
-                    .as_db_error()
-                    .and_then(|error| error.parsed_severity())
-                    == Some(Severity::Error);
-
-            if !connection_can_be_reused {
-                drop(Object::take(client));
-            }
-
-            return Err(NativeError::PostgresQuery(error));
-        }
-    };
+        .map_err(NativeError::PostgresQuery)?;
 
     let mut decoded_rows = Vec::with_capacity(rows.len());
 
@@ -120,4 +103,29 @@ pub(crate) async fn execute(
     }
 
     Ok(decoded_rows)
+}
+
+pub(crate) async fn execute(
+    pool: &Pool,
+    sql: &str,
+    params: &[QueryParameter],
+) -> Result<QueryRows, NativeError> {
+    let client = pool
+        .get()
+        .await
+        .map_err(|error| NativeError::PostgresPoolAcquire(error.to_string()))?;
+
+    let result = execute_on_client(&**client, sql, params).await;
+
+    if let Err(NativeError::PostgresQuery(error)) = &result {
+        let connection_can_be_reused = !client.is_closed()
+            && error
+                .as_db_error()
+                .and_then(|error| error.parsed_severity())
+                == Some(Severity::Error);
+        if !connection_can_be_reused {
+            drop(Object::take(client));
+        }
+    }
+    result
 }
