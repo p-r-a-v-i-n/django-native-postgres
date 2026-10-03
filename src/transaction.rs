@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use pyo3::prelude::*;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::cancellation::CancellationGuard;
 use crate::error::NativeError;
 use crate::parameter::QueryParameter;
 use crate::postgres::{self, QueryRows};
@@ -14,6 +15,7 @@ pub(crate) enum TransactionCommand {
     Execute {
         sql: String,
         params: Vec<QueryParameter>,
+        cancellation: oneshot::Receiver<()>,
         response: oneshot::Sender<Result<QueryRows, NativeError>>,
     },
     Commit {
@@ -91,6 +93,7 @@ pub(crate) async fn execute(
         return Err(NativeError::TransactionHandleClosed);
     }
 
+    let (mut cancellation_guard, cancellation) = CancellationGuard::new();
     let (response_tx, response_rx) = oneshot::channel();
 
     if handle
@@ -98,6 +101,7 @@ pub(crate) async fn execute(
         .send(TransactionCommand::Execute {
             sql,
             params,
+            cancellation,
             response: response_tx,
         })
         .await
@@ -107,7 +111,10 @@ pub(crate) async fn execute(
         return Err(NativeError::TransactionHandleClosed);
     }
 
-    match response_rx.await {
+    let response = response_rx.await;
+    cancellation_guard.disarm();
+
+    match response {
         Ok(result) => result,
         Err(_) => {
             handle.mark_closed();
@@ -183,10 +190,31 @@ async fn run_transaction(
             TransactionCommand::Execute {
                 sql,
                 params,
+                mut cancellation,
                 response,
             } => {
-                let result = postgres::execute_on_client(&*transaction, &sql, &params).await;
+                let cancel_token = transaction.cancel_token();
+                let result = postgres::execute_on_client(
+                    &*transaction,
+                    cancel_token,
+                    &sql,
+                    &params,
+                    &mut cancellation,
+                )
+                .await;
+                let connection_can_be_reused = !transaction.client().is_closed()
+                    && !matches!(
+                        &result,
+                        Err(NativeError::PostgresCancel(_))
+                            | Err(NativeError::QueryCancelled {
+                                connection_can_be_reused: false,
+                            })
+                    );
                 let _ = response.send(result);
+
+                if !connection_can_be_reused {
+                    return;
+                }
             }
             TransactionCommand::Commit { response } => {
                 let result =

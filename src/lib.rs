@@ -4,6 +4,7 @@ use crate::error::NativeError;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
+mod cancellation;
 mod error;
 mod parameter;
 mod placeholders;

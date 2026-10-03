@@ -4,9 +4,10 @@ use crate::placeholders::rewrite_django_placeholders;
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod};
 use pyo3::prelude::*;
 use std::time::Duration;
+use tokio::sync::oneshot;
 use tokio_postgres::error::Severity;
 use tokio_postgres::types::{ToSql, Type};
-use tokio_postgres::{GenericClient, NoTls};
+use tokio_postgres::{CancelToken, GenericClient, NoTls};
 
 #[derive(Debug, IntoPyObject)]
 pub(crate) enum QueryValue {
@@ -18,6 +19,13 @@ pub(crate) enum QueryValue {
 }
 
 pub(crate) type QueryRows = Vec<Vec<Option<QueryValue>>>;
+
+fn query_error_allows_connection_reuse(error: &tokio_postgres::Error) -> bool {
+    error
+        .as_db_error()
+        .and_then(|error| error.parsed_severity())
+        == Some(Severity::Error)
+}
 
 pub(crate) fn create_pool(
     database_url: &str,
@@ -43,8 +51,10 @@ pub(crate) fn create_pool(
 
 pub(crate) async fn execute_on_client<C>(
     client: &C,
+    cancel_token: CancelToken,
     sql: &str,
     params: &[QueryParameter],
+    cancellation: &mut oneshot::Receiver<()>,
 ) -> Result<QueryRows, NativeError>
 where
     C: GenericClient + Sync,
@@ -56,10 +66,31 @@ where
 
     let postgres_sql = rewrite_django_placeholders(sql, params.len())?;
 
-    let rows = client
-        .query_typed(postgres_sql.as_str(), &postgres_params)
-        .await
-        .map_err(NativeError::PostgresQuery)?;
+    let query = client.query_typed(postgres_sql.as_str(), &postgres_params);
+    tokio::pin!(query);
+
+    let rows = tokio::select! {
+        biased;
+        result = &mut query => {
+            result.map_err(NativeError::PostgresQuery)?
+        }
+        _ = &mut *cancellation => {
+            cancel_token
+                .cancel_query(NoTls)
+                .await
+                .map_err(NativeError::PostgresCancel)?;
+
+            // PostgreSQL sends the cancellation result through the original
+            // connection. Drain it before that connection can be reused.
+            let connection_can_be_reused = match query.await {
+                Ok(_) => true,
+                Err(error) => query_error_allows_connection_reuse(&error),
+            };
+            return Err(NativeError::QueryCancelled {
+                connection_can_be_reused,
+            });
+        }
+    };
 
     let mut decoded_rows = Vec::with_capacity(rows.len());
 
@@ -109,23 +140,35 @@ pub(crate) async fn execute(
     pool: &Pool,
     sql: &str,
     params: &[QueryParameter],
+    cancellation: &mut oneshot::Receiver<()>,
 ) -> Result<QueryRows, NativeError> {
-    let client = pool
-        .get()
-        .await
-        .map_err(|error| NativeError::PostgresPoolAcquire(error.to_string()))?;
-
-    let result = execute_on_client(&**client, sql, params).await;
-
-    if let Err(NativeError::PostgresQuery(error)) = &result {
-        let connection_can_be_reused = !client.is_closed()
-            && error
-                .as_db_error()
-                .and_then(|error| error.parsed_severity())
-                == Some(Severity::Error);
-        if !connection_can_be_reused {
-            drop(Object::take(client));
+    let client = tokio::select! {
+        result = pool.get() => {
+            result.map_err(|error| NativeError::PostgresPoolAcquire(error.to_string()))?
         }
+        _ = &mut *cancellation => {
+            return Err(NativeError::QueryCancelled {
+                connection_can_be_reused: true,
+            });
+        }
+    };
+
+    let cancel_token = client.cancel_token();
+    let result = execute_on_client(&**client, cancel_token, sql, params, cancellation).await;
+
+    let connection_can_be_reused = !client.is_closed()
+        && match &result {
+            Err(NativeError::PostgresCancel(_)) => false,
+            Err(NativeError::PostgresQuery(error)) => query_error_allows_connection_reuse(error),
+            Err(NativeError::QueryCancelled {
+                connection_can_be_reused,
+            }) => *connection_can_be_reused,
+            _ => true,
+        };
+
+    if !connection_can_be_reused {
+        drop(Object::take(client));
     }
+
     result
 }

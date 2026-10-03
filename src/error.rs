@@ -6,6 +6,7 @@ pub(crate) enum NativeError {
     PostgresPoolBuild(String),
     PostgresPoolAcquire(String),
     PostgresQuery(tokio_postgres::Error),
+    PostgresCancel(tokio_postgres::Error),
     PostgresTransaction {
         operation: &'static str,
         source: tokio_postgres::Error,
@@ -24,6 +25,9 @@ pub(crate) enum NativeError {
     PoolHandleClosed,
     TransactionHandleClosed,
     TransactionHandleProcessMismatch,
+    QueryCancelled {
+        connection_can_be_reused: bool,
+    },
 }
 
 impl std::fmt::Display for NativeError {
@@ -52,6 +56,9 @@ impl std::fmt::Display for NativeError {
             }
             Self::PostgresQuery(error) => {
                 write!(formatter, "PostgreSQL query failed: {error}")
+            }
+            Self::PostgresCancel(error) => {
+                write!(formatter, "failed to cancel PostgreSQL query: {error}")
             }
             Self::PostgresDecode { column, source } => {
                 write!(
@@ -96,6 +103,9 @@ impl std::fmt::Display for NativeError {
                     "PostgreSQL transaction handle belongs to a different process"
                 )
             }
+            Self::QueryCancelled { .. } => {
+                write!(formatter, "PostgreSQL query was cancelled")
+            }
         }
     }
 }
@@ -103,7 +113,9 @@ impl std::fmt::Display for NativeError {
 impl std::error::Error for NativeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::PostgresConnect(error) | Self::PostgresQuery(error) => Some(error),
+            Self::PostgresConnect(error)
+            | Self::PostgresQuery(error)
+            | Self::PostgresCancel(error) => Some(error),
             Self::PostgresTransaction { source, .. } | Self::PostgresDecode { source, .. } => {
                 Some(source)
             }
