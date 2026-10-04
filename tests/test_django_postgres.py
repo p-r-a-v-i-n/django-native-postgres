@@ -59,6 +59,17 @@ def django_book(transactional_db):
     return Book.objects.create(name="Django")
 
 
+@pytest.fixture
+def django_books(transactional_db):
+    return Book.objects.bulk_create(
+        [
+            Book(name="Async"),
+            Book(name="Django"),
+            Book(name="PostgreSQL"),
+        ]
+    )
+
+
 def test_django_can_create_and_query_model_with_sync_backend():
     Book.objects.create(name="Django")
 
@@ -146,3 +157,79 @@ async def test_django_aexists_executes_through_native_backend(
 
     assert result is expected
     execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_django_async_iteration_executes_through_native_backend(django_books):
+    executor = connections["default"].get_async_executor()
+
+    with mock.patch.object(
+        executor,
+        "execute",
+        wraps=executor.execute,
+    ) as execute:
+        books = [book async for book in Book.objects.order_by("name")]
+
+    assert [book.name for book in books] == ["Async", "Django", "PostgreSQL"]
+    execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_django_async_iteration_supports_values_iterables(django_books):
+    executor = connections["default"].get_async_executor()
+
+    with mock.patch.object(
+        executor,
+        "execute",
+        wraps=executor.execute,
+    ) as execute:
+        values = [value async for value in Book.objects.order_by("name").values("name")]
+        tuples = [
+            value async for value in Book.objects.order_by("name").values_list("name")
+        ]
+        flat_values = [
+            value
+            async for value in Book.objects.order_by("name").values_list(
+                "name", flat=True
+            )
+        ]
+        named_values = [
+            value
+            async for value in Book.objects.order_by("name").values_list(
+                "name", named=True
+            )
+        ]
+
+    names = ["Async", "Django", "PostgreSQL"]
+    assert values == [{"name": name} for name in names]
+    assert tuples == [(name,) for name in names]
+    assert flat_values == names
+    assert [value.name for value in named_values] == names
+    assert execute.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_django_aiterator_fetches_all_rows_in_chunks(django_books):
+    books = [
+        book async for book in Book.objects.order_by("name").aiterator(chunk_size=2)
+    ]
+
+    assert [book.name for book in books] == ["Async", "Django", "PostgreSQL"]
+
+
+@pytest.mark.asyncio
+async def test_django_aiterator_can_be_closed_early(django_books):
+    iterator = (
+        Book.objects.order_by("name")
+        .values_list("name", flat=True)
+        .aiterator(chunk_size=1)
+    )
+
+    assert await anext(iterator) == "Async"
+    await iterator.aclose()
+
+    names = [
+        name
+        async for name in Book.objects.order_by("name").values_list("name", flat=True)
+    ]
+    assert names == ["Async", "Django", "PostgreSQL"]
