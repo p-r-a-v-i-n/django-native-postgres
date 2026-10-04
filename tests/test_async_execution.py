@@ -5,6 +5,7 @@ import pytest
 from django.core.exceptions import ImproperlyConfigured
 from django.db import connections
 from django_native_postgres.base import DatabaseWrapper
+from django_native_postgres.cursor import NativeAsyncCursor
 from django_native_postgres.executor import NativeExecutor
 from psycopg.conninfo import conninfo_to_dict
 
@@ -50,6 +51,13 @@ def test_database_wrapper_builds_and_caches_native_executor():
         "host": "database.example.com",
         "port": "5432",
     }
+
+
+def test_database_wrapper_opts_in_to_native_async_execution():
+    connection = connections["default"]
+
+    assert connection.features.supports_async is True
+    assert isinstance(connection.acursor(), NativeAsyncCursor)
 
 
 def test_database_wrapper_rejects_zero_native_pool_max_size():
@@ -108,6 +116,38 @@ async def test_aexecute_forwards_query_to_process_executor():
     assert result is executor.execute.return_value
     executor.execute.assert_awaited_once_with(sql=sql, params=params)
     assert connection.connection is None
+
+
+@pytest.mark.asyncio
+async def test_async_cursor_executes_and_fetches_rows():
+    connection = mock.Mock()
+    connection.aexecute = mock.AsyncMock(return_value=[[1], [2]])
+    cursor = NativeAsyncCursor(connection)
+
+    async with cursor as opened_cursor:
+        result = await opened_cursor.aexecute("SELECT %s", (1,))
+
+        assert result is None
+        assert await opened_cursor.afetchone() == [1]
+        assert await opened_cursor.afetchone() == [2]
+        assert await opened_cursor.afetchone() is None
+
+    connection.aexecute.assert_awaited_once_with("SELECT %s", (1,))
+
+
+@pytest.mark.asyncio
+async def test_async_cursor_cannot_fetch_without_an_active_result():
+    cursor = NativeAsyncCursor(mock.Mock())
+    message = "No active query result on this cursor"
+
+    with pytest.raises(RuntimeError, match=message):
+        await cursor.afetchone()
+
+    async with cursor:
+        pass
+
+    with pytest.raises(RuntimeError, match=message):
+        await cursor.afetchone()
 
 
 @pytest.mark.asyncio

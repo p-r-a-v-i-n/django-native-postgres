@@ -128,16 +128,21 @@ async def test_django_exists_query_executes_through_native_executor(
 
 
 @pytest.mark.asyncio
-async def test_django_aexists_executes_through_native_backend(django_book):
+@pytest.mark.parametrize("expected", [True, False])
+async def test_django_aexists_executes_through_native_backend(
+    django_book,
+    expected,
+):
     connection = connections["default"]
     executor = connection.get_async_executor()
+    name = django_book.name if expected else "missing"
 
     with mock.patch.object(
         executor,
         "execute",
         wraps=executor.execute,
     ) as execute:
-        result = await Book.objects.filter(name=django_book.name).aexists()
+        result = await Book.objects.filter(name=name).aexists()
 
-    assert result is True
+    assert result is expected
     execute.assert_awaited_once()
