@@ -55,3 +55,19 @@ class NativeAsyncCursor:
         row = self._rows[self._position]
         self._position += 1
         return row
+
+    async def afetchmany(self, size: int = 1) -> list[QueryRow]:
+        if self._rows is None:
+            raise RuntimeError("No active query result on this cursor")
+
+        rows = self._rows[self._position : self._position + size]
+        self._position += len(rows)
+        return rows
+
+    async def afetchall(self) -> list[QueryRow]:
+        if self._rows is None:
+            raise RuntimeError("No active query result on this cursor")
+
+        rows = self._rows[self._position :]
+        self._position = len(self._rows)
+        return rows
