@@ -8,8 +8,10 @@ use crate::cancellation::CancellationGuard;
 use crate::error::NativeError;
 use crate::parameter::QueryParameter;
 use crate::postgres::{self, QueryRows};
+use crate::transaction_options::TransactionOptions;
 use deadpool_postgres::{Object, Pool};
 use std::process;
+use tokio_postgres::NoTls;
 
 pub(crate) enum TransactionCommand {
     Execute {
@@ -65,16 +67,31 @@ impl TransactionHandle {
     }
 }
 
-pub(crate) async fn begin(pool: &Pool) -> Result<TransactionHandle, NativeError> {
-    let client = pool
-        .get()
-        .await
-        .map_err(|error| NativeError::PostgresPoolAcquire(error.to_string()))?;
+pub(crate) async fn begin(
+    pool: &Pool,
+    options: TransactionOptions,
+    mut cancellation: oneshot::Receiver<()>,
+) -> Result<TransactionHandle, NativeError> {
+    let client = tokio::select! {
+        biased;
+        _ = &mut cancellation => {
+            return Err(NativeError::TransactionStartCancelled);
+        }
+        result = pool.get() => {
+            result.map_err(|error| NativeError::PostgresPoolAcquire(error.to_string()))?
+        }
+    };
 
     let (sender, receiver) = mpsc::channel(1);
     let (ready_sender, ready_receiver) = oneshot::channel();
 
-    tokio::spawn(run_transaction(client, receiver, ready_sender));
+    tokio::spawn(run_transaction(
+        client,
+        options,
+        cancellation,
+        receiver,
+        ready_sender,
+    ));
 
     ready_receiver
         .await
@@ -167,16 +184,55 @@ pub(crate) async fn rollback(handle: TransactionHandle) -> Result<(), NativeErro
 
 async fn run_transaction(
     mut client: Object,
+    options: TransactionOptions,
+    mut cancellation: oneshot::Receiver<()>,
     mut receiver: mpsc::Receiver<TransactionCommand>,
     ready: oneshot::Sender<Result<(), NativeError>>,
 ) {
-    let transaction = match client.transaction().await {
-        Ok(transaction) => transaction,
-        Err(source) => {
-            let _ = ready.send(Err(NativeError::PostgresTransaction {
-                operation: "begin",
-                source,
-            }));
+    let cancel_token = client.cancel_token();
+    let mut builder = client.build_transaction();
+
+    if let Some(isolation_level) = options.isolation_level() {
+        builder = builder.isolation_level(isolation_level);
+    }
+    if let Some(read_only) = options.read_only() {
+        builder = builder.read_only(read_only);
+    }
+    if let Some(deferrable) = options.deferrable() {
+        builder = builder.deferrable(deferrable);
+    }
+
+    let mut start = Box::pin(builder.start());
+
+    let transaction = tokio::select! {
+        biased;
+        result = &mut start => {
+            match result {
+                Ok(transaction) => transaction,
+                Err(source) => {
+                    let _ = ready.send(Err(NativeError::PostgresTransaction {
+                        operation: "begin",
+                        source,
+                    }));
+                    return;
+                }
+            }
+        }
+        _ = &mut cancellation => {
+            let cancellation_result = cancel_token.cancel_query(NoTls).await;
+            let start_result = start.as_mut().await;
+            drop(start);
+
+            // A successfully started transaction is rolled back explicitly.
+            // On an error, tokio-postgres already queues a rollback before
+            // the start future returns.
+            clean_up_cancelled_start(start_result).await;
+
+            let error = match cancellation_result {
+                Ok(()) => NativeError::TransactionStartCancelled,
+                Err(source) => NativeError::PostgresCancel(source),
+            };
+            let _ = ready.send(Err(error));
             return;
         }
     };
@@ -239,5 +295,13 @@ async fn run_transaction(
                 return;
             }
         }
+    }
+}
+
+async fn clean_up_cancelled_start(
+    result: Result<deadpool_postgres::Transaction<'_>, tokio_postgres::Error>,
+) {
+    if let Ok(transaction) = result {
+        let _ = transaction.rollback().await;
     }
 }

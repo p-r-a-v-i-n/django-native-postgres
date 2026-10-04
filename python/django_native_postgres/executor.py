@@ -4,8 +4,16 @@ from asyncio import Task, current_task
 from collections.abc import Sequence
 from contextvars import ContextVar, Token
 from types import TracebackType
+from typing import Literal
 
 from django_native_postgres import _native
+
+type TransactionIsolationLevel = Literal[
+    "read_uncommitted",
+    "read_committed",
+    "repeatable_read",
+    "serializable",
+]
 
 
 class NativeTransaction:
@@ -13,6 +21,10 @@ class NativeTransaction:
         self,
         pool: _native.PoolHandle,
         active_transaction: ContextVar[NativeTransaction | None],
+        *,
+        isolation_level: TransactionIsolationLevel | None = None,
+        read_only: bool | None = None,
+        deferrable: bool | None = None,
     ):
         self._pool = pool
         self._active_transaction = active_transaction
@@ -24,6 +36,9 @@ class NativeTransaction:
         self._savepoint_number = 0
         self._owner_task: Task[object] | None = None
         self._rollback_only = False
+        self._isolation_level = isolation_level
+        self._read_only = read_only
+        self._deferrable = deferrable
 
     def _validate_task(self) -> None:
         if self._root._owner_task is not current_task():
@@ -50,7 +65,12 @@ class NativeTransaction:
         active_transaction = self._active_transaction.get()
 
         if active_transaction is None:
-            self._handle = await _native.begin_transaction(self._pool)
+            self._handle = await _native.begin_transaction(
+                self._pool,
+                isolation_level=self._isolation_level,
+                read_only=self._read_only,
+                deferrable=self._deferrable,
+            )
             self._owner_task = owner_task
         else:
             handle = active_transaction._handle
@@ -59,6 +79,18 @@ class NativeTransaction:
                 raise RuntimeError("Native transaction is not active")
 
             active_transaction._validate_usable()
+
+            if any(
+                option is not None
+                for option in (
+                    self._isolation_level,
+                    self._read_only,
+                    self._deferrable,
+                )
+            ):
+                raise ValueError(
+                    "transaction options can only be used on the outermost transaction"
+                )
 
             self._root = active_transaction._root
             self._root._savepoint_number += 1
@@ -194,8 +226,24 @@ class NativeExecutor:
     async def close(self) -> None:
         await _native.close_pool(self.pool)
 
-    def transaction(self) -> NativeTransaction:
+    def transaction(
+        self,
+        *,
+        isolation_level: TransactionIsolationLevel | None = None,
+        read_only: bool | None = None,
+        deferrable: bool | None = None,
+    ) -> NativeTransaction:
+        if isolation_level is not None and not isinstance(isolation_level, str):
+            raise TypeError("isolation_level must be a string or None")
+        if read_only is not None and not isinstance(read_only, bool):
+            raise TypeError("read_only must be a bool or None")
+        if deferrable is not None and not isinstance(deferrable, bool):
+            raise TypeError("deferrable must be a bool or None")
+
         return NativeTransaction(
             self.pool,
             self._active_transaction,
+            isolation_level=isolation_level,
+            read_only=read_only,
+            deferrable=deferrable,
         )

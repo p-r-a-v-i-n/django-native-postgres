@@ -1,7 +1,7 @@
 //! Minimal native packaging probe for the project foundation.
 
 use crate::error::NativeError;
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 mod cancellation;
@@ -12,6 +12,7 @@ mod pool;
 mod postgres;
 mod runtime;
 mod transaction;
+mod transaction_options;
 
 #[pyfunction]
 fn build_info() -> (&'static str, &'static str) {
@@ -39,9 +40,23 @@ async fn close_pool(pool: Py<pool::PoolHandle>) -> PyResult<()> {
         .map_err(to_python_error)
 }
 
-#[pyfunction]
-async fn begin_transaction(pool: Py<pool::PoolHandle>) -> PyResult<transaction::TransactionHandle> {
-    runtime::begin_transaction(pool.get().clone())
+#[pyfunction(signature = (
+    pool,
+    isolation_level=None,
+    read_only=None,
+    deferrable=None
+))]
+async fn begin_transaction(
+    pool: Py<pool::PoolHandle>,
+    isolation_level: Option<String>,
+    read_only: Option<bool>,
+    deferrable: Option<bool>,
+) -> PyResult<transaction::TransactionHandle> {
+    let options =
+        transaction_options::TransactionOptions::new(isolation_level, read_only, deferrable)
+            .map_err(to_python_error)?;
+
+    runtime::begin_transaction(pool.get().clone(), options)
         .await
         .map_err(to_python_error)
 }
@@ -106,5 +121,10 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 fn to_python_error(error: NativeError) -> PyErr {
-    PyRuntimeError::new_err(error.to_string())
+    match error {
+        error @ NativeError::InvalidTransactionIsolationLevel(_) => {
+            PyValueError::new_err(error.to_string())
+        }
+        error => PyRuntimeError::new_err(error.to_string()),
+    }
 }

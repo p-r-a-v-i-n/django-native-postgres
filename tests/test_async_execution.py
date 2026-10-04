@@ -211,7 +211,12 @@ async def test_native_transaction_commits_after_successful_context():
             )
 
     assert result is rows
-    begin_transaction.assert_awaited_once_with(pool)
+    begin_transaction.assert_awaited_once_with(
+        pool,
+        isolation_level=None,
+        read_only=None,
+        deferrable=None,
+    )
     execute_transaction.assert_awaited_once_with(
         transaction=handle,
         sql="SELECT %s::BIGINT",
@@ -219,6 +224,62 @@ async def test_native_transaction_commits_after_successful_context():
     )
     commit_transaction.assert_awaited_once_with(handle)
     rollback_transaction.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_native_transaction_forwards_transaction_options():
+    pool = object()
+    handle = object()
+
+    with (
+        mock.patch(
+            "django_native_postgres.executor._native.create_pool",
+            return_value=pool,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.begin_transaction",
+            new=mock.AsyncMock(return_value=handle),
+        ) as begin_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.commit_transaction",
+            new=mock.AsyncMock(),
+        ) as commit_transaction,
+    ):
+        executor = NativeExecutor(database_url="postgresql://example")
+
+        async with executor.transaction(
+            isolation_level="serializable",
+            read_only=True,
+            deferrable=True,
+        ):
+            pass
+
+    begin_transaction.assert_awaited_once_with(
+        pool,
+        isolation_level="serializable",
+        read_only=True,
+        deferrable=True,
+    )
+    commit_transaction.assert_awaited_once_with(handle)
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"isolation_level": 1}, "isolation_level must be a string or None"),
+        ({"read_only": "yes"}, "read_only must be a bool or None"),
+        ({"deferrable": 1}, "deferrable must be a bool or None"),
+    ],
+)
+def test_native_transaction_rejects_invalid_option_types(options, message):
+    with mock.patch(
+        "django_native_postgres.executor._native.create_pool",
+        return_value=object(),
+    ):
+        executor = NativeExecutor(database_url="postgresql://example")
+
+    with pytest.raises(TypeError, match=message):
+        executor.transaction(**options)
 
 
 @pytest.mark.asyncio
@@ -438,7 +499,12 @@ async def test_executor_uses_savepoint_for_nested_transaction():
             async with executor.transaction():
                 await executor.execute(sql="SELECT 1")
 
-    begin_transaction.assert_awaited_once_with(pool)
+    begin_transaction.assert_awaited_once_with(
+        pool,
+        isolation_level=None,
+        read_only=None,
+        deferrable=None,
+    )
     assert execute_transaction.await_args_list == [
         mock.call(
             transaction=handle,

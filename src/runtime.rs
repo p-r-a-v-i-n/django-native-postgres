@@ -10,6 +10,7 @@ use crate::parameter::QueryParameter;
 use crate::pool::PoolHandle;
 use crate::postgres::{self, QueryRows};
 use crate::transaction::{self, TransactionHandle};
+use crate::transaction_options::TransactionOptions;
 use deadpool_postgres::Pool;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
@@ -29,6 +30,8 @@ enum Command {
     },
     BeginTransaction {
         pool: PoolHandle,
+        options: TransactionOptions,
+        cancellation: oneshot::Receiver<()>,
         response: oneshot::Sender<Result<TransactionHandle, NativeError>>,
     },
     ClosePools {
@@ -105,7 +108,11 @@ pub(crate) async fn execute(
     response.map_err(|_| NativeError::ResponseChannelClosed)?
 }
 
-pub(crate) async fn begin_transaction(pool: PoolHandle) -> Result<TransactionHandle, NativeError> {
+pub(crate) async fn begin_transaction(
+    pool: PoolHandle,
+    options: TransactionOptions,
+) -> Result<TransactionHandle, NativeError> {
+    let (mut cancellation_guard, cancellation) = CancellationGuard::new();
     let service = RuntimeService::start();
     let (response_tx, response_rx) = oneshot::channel();
 
@@ -113,14 +120,17 @@ pub(crate) async fn begin_transaction(pool: PoolHandle) -> Result<TransactionHan
         .sender
         .send(Command::BeginTransaction {
             pool,
+            options,
+            cancellation,
             response: response_tx,
         })
         .await
         .map_err(|_| NativeError::CommandChannelClosed)?;
 
-    response_rx
-        .await
-        .map_err(|_| NativeError::ResponseChannelClosed)?
+    let response = response_rx.await;
+    cancellation_guard.disarm();
+
+    response.map_err(|_| NativeError::ResponseChannelClosed)?
 }
 
 pub(crate) async fn close_pools() -> Result<(), NativeError> {
@@ -248,9 +258,14 @@ async fn handle_command(command: Command, pools: PoolRegistry) {
             // Cancellation may drop the receiver before this task completes.
             let _ = response.send(result);
         }
-        Command::BeginTransaction { pool, response } => {
+        Command::BeginTransaction {
+            pool,
+            options,
+            cancellation,
+            response,
+        } => {
             let result = match get_or_create_pool(&pools, &pool).await {
-                Ok(pool) => transaction::begin(&pool).await,
+                Ok(pool) => transaction::begin(&pool, options, cancellation).await,
                 Err(error) => Err(error),
             };
             let _ = response.send(result);
