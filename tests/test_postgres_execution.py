@@ -1277,6 +1277,293 @@ async def test_cancelling_transaction_query_releases_connection(
         await _native.close_pool(observer_pool)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("isolation_level", "postgres_value"),
+    [
+        ("read_uncommitted", "read uncommitted"),
+        ("read_committed", "read committed"),
+        ("repeatable_read", "repeatable read"),
+        ("serializable", "serializable"),
+    ],
+)
+async def test_transaction_uses_requested_isolation_level(
+    postgres_database_url,
+    isolation_level,
+    postgres_value,
+):
+    executor = NativeExecutor(database_url=postgres_database_url)
+
+    try:
+        async with executor.transaction(isolation_level=isolation_level):
+            rows = await executor.execute(sql="SHOW transaction_isolation")
+
+        assert rows == [[postgres_value]]
+    finally:
+        await executor.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("read_only", "postgres_value"),
+    [(True, "on"), (False, "off")],
+)
+async def test_transaction_uses_requested_read_only_mode(
+    postgres_database_url,
+    read_only,
+    postgres_value,
+):
+    executor = NativeExecutor(database_url=postgres_database_url)
+
+    try:
+        async with executor.transaction(read_only=read_only):
+            rows = await executor.execute(sql="SHOW transaction_read_only")
+
+        assert rows == [[postgres_value]]
+    finally:
+        await executor.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("deferrable", "postgres_value"),
+    [(True, "on"), (False, "off")],
+)
+async def test_transaction_uses_requested_deferrable_mode(
+    postgres_database_url,
+    deferrable,
+    postgres_value,
+):
+    executor = NativeExecutor(database_url=postgres_database_url)
+
+    try:
+        async with executor.transaction(deferrable=deferrable):
+            rows = await executor.execute(sql="SHOW transaction_deferrable")
+
+        assert rows == [[postgres_value]]
+    finally:
+        await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_transaction_combines_all_options(postgres_database_url):
+    executor = NativeExecutor(database_url=postgres_database_url)
+
+    try:
+        async with executor.transaction(
+            isolation_level="serializable",
+            read_only=True,
+            deferrable=True,
+        ):
+            rows = await executor.execute(
+                sql="""
+                    SELECT
+                        current_setting('transaction_isolation'),
+                        current_setting('transaction_read_only'),
+                        current_setting('transaction_deferrable')
+                """
+            )
+
+        assert rows == [["serializable", "on", "on"]]
+    finally:
+        await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_transaction_without_options_preserves_postgres_defaults(
+    postgres_database_url,
+):
+    executor = NativeExecutor(
+        database_url=postgres_database_url,
+        pool_max_size=1,
+    )
+
+    try:
+        await executor.execute(
+            sql="SET default_transaction_isolation = 'repeatable read'"
+        )
+        await executor.execute(sql="SET default_transaction_read_only = on")
+        await executor.execute(sql="SET default_transaction_deferrable = on")
+
+        async with executor.transaction():
+            rows = await executor.execute(
+                sql="""
+                    SELECT
+                        current_setting('transaction_isolation'),
+                        current_setting('transaction_read_only'),
+                        current_setting('transaction_deferrable')
+                """
+            )
+
+        assert rows == [["repeatable read", "on", "on"]]
+    finally:
+        await executor.execute(sql="RESET default_transaction_isolation")
+        await executor.execute(sql="RESET default_transaction_read_only")
+        await executor.execute(sql="RESET default_transaction_deferrable")
+        await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_transaction_options_override_postgres_defaults(
+    postgres_database_url,
+):
+    executor = NativeExecutor(
+        database_url=postgres_database_url,
+        pool_max_size=1,
+    )
+
+    try:
+        await executor.execute(
+            sql="SET default_transaction_isolation = 'repeatable read'"
+        )
+        await executor.execute(sql="SET default_transaction_read_only = on")
+        await executor.execute(sql="SET default_transaction_deferrable = on")
+
+        async with executor.transaction(
+            isolation_level="read_committed",
+            read_only=False,
+            deferrable=False,
+        ):
+            rows = await executor.execute(
+                sql="""
+                    SELECT
+                        current_setting('transaction_isolation'),
+                        current_setting('transaction_read_only'),
+                        current_setting('transaction_deferrable')
+                """
+            )
+
+        assert rows == [["read committed", "off", "off"]]
+    finally:
+        await executor.execute(sql="RESET default_transaction_isolation")
+        await executor.execute(sql="RESET default_transaction_read_only")
+        await executor.execute(sql="RESET default_transaction_deferrable")
+        await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_transaction_rejects_invalid_isolation_level(
+    postgres_database_url,
+):
+    executor = NativeExecutor(database_url=postgres_database_url)
+
+    try:
+        with pytest.raises(
+            ValueError,
+            match="unsupported transaction isolation level",
+        ):
+            async with executor.transaction(isolation_level="snapshot"):
+                pass
+
+        rows = await executor.execute(sql="SELECT 1::BIGINT")
+        assert rows == [[1]]
+    finally:
+        await executor.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"isolation_level": "serializable"},
+        {"read_only": True},
+        {"deferrable": True},
+    ],
+)
+async def test_nested_transaction_rejects_transaction_options(
+    postgres_database_url,
+    options,
+):
+    executor = NativeExecutor(database_url=postgres_database_url)
+
+    try:
+        async with executor.transaction():
+            with pytest.raises(
+                ValueError,
+                match=(
+                    "transaction options can only be used on the outermost transaction"
+                ),
+            ):
+                async with executor.transaction(**options):
+                    pass
+
+            rows = await executor.execute(sql="SELECT 1::BIGINT")
+
+        assert rows == [[1]]
+    finally:
+        await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_read_only_transaction_rejects_writes(postgres_database_url):
+    executor = NativeExecutor(database_url=postgres_database_url)
+
+    try:
+        await executor.execute(sql="DROP TABLE IF EXISTS native_read_only_transaction")
+        await executor.execute(
+            sql="CREATE TABLE native_read_only_transaction (value BIGINT)"
+        )
+
+        with pytest.raises(RuntimeError, match="PostgreSQL query failed"):
+            async with executor.transaction(read_only=True):
+                await executor.execute(
+                    sql="INSERT INTO native_read_only_transaction VALUES (1)"
+                )
+
+        rows = await executor.execute(
+            sql="SELECT value FROM native_read_only_transaction"
+        )
+        assert rows == []
+    finally:
+        await executor.execute(sql="DROP TABLE IF EXISTS native_read_only_transaction")
+        await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_transaction_start_waiting_for_pool(
+    postgres_database_url,
+):
+    executor = NativeExecutor(
+        database_url=postgres_database_url,
+        pool_max_size=1,
+        pool_wait_timeout_ms=5_000,
+    )
+    blocking_transaction = await _native.begin_transaction(executor.pool)
+    transaction_task = None
+
+    async def start_transaction():
+        async with executor.transaction(
+            isolation_level="serializable",
+            read_only=True,
+            deferrable=True,
+        ):
+            pass
+
+    try:
+        transaction_task = asyncio.create_task(start_transaction())
+        await asyncio.sleep(0)
+
+        transaction_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await transaction_task
+
+        await _native.rollback_transaction(blocking_transaction)
+        blocking_transaction = None
+
+        rows = await asyncio.wait_for(
+            executor.execute(sql="SELECT 1::BIGINT"),
+            timeout=1,
+        )
+        assert rows == [[1]]
+    finally:
+        if transaction_task is not None and not transaction_task.done():
+            transaction_task.cancel()
+            await asyncio.gather(transaction_task, return_exceptions=True)
+        if blocking_transaction is not None:
+            await _native.rollback_transaction(blocking_transaction)
+        await executor.close()
+
+
 @pytest.mark.skipif(
     "fork" not in multiprocessing.get_all_start_methods(),
     reason="fork is not supported",

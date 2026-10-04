@@ -22,7 +22,9 @@ pub(crate) enum NativeError {
     },
     InvalidPoolMaxSize,
     InvalidPoolWaitTimeout,
+    InvalidTransactionIsolationLevel(String),
     PoolHandleClosed,
+    TransactionStartCancelled,
     TransactionHandleClosed,
     TransactionHandleProcessMismatch,
     QueryCancelled {
@@ -85,8 +87,17 @@ impl std::fmt::Display for NativeError {
                     "PostgreSQL pool wait timeout must be a positive integer"
                 )
             }
+            Self::InvalidTransactionIsolationLevel(value) => {
+                write!(
+                    formatter,
+                    "unsupported transaction isolation level: {value}"
+                )
+            }
             Self::PoolHandleClosed => {
                 write!(formatter, "PostgreSQL pool handle is closed")
+            }
+            Self::TransactionStartCancelled => {
+                write!(formatter, "PostgreSQL transaction start was cancelled")
             }
             Self::PostgresTransaction { operation, source } => {
                 write! {
