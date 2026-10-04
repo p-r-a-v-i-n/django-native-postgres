@@ -4,11 +4,14 @@ from django.db.backends.postgresql.base import (
 )
 from psycopg.conninfo import make_conninfo
 
+from django_native_postgres.cursor import NativeAsyncCursor
 from django_native_postgres.executor import NativeExecutor
+from django_native_postgres.features import DatabaseFeatures
 
 
 class DatabaseWrapper(PostgreSQLDatabaseWrapper):
     display_name = "PostgreSQL (native async)"
+    features_class = DatabaseFeatures
 
     def get_async_executor(self):
         executor = getattr(self, "_native_executor", None)
@@ -55,6 +58,9 @@ class DatabaseWrapper(PostgreSQLDatabaseWrapper):
     async def aexecute(self, sql, params=None):
         executor = self.get_async_executor()
         return await executor.execute(sql=sql, params=params)
+
+    def acursor(self):
+        return NativeAsyncCursor(self)
 
     def get_connection_params(self):
         connection_params = super().get_connection_params()
