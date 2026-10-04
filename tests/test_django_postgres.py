@@ -322,3 +322,44 @@ async def test_django_acreate_and_asave_execute_through_native_backend(
     assert book.pk is not None
     assert saved.name == "Saved"
     assert execute_result.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_django_async_bulk_writes_execute_through_native_backend(
+    transactional_db,
+):
+    executor = connections["default"].get_async_executor()
+    books = [Book(name="First"), Book(name="Second"), Book(name="Third")]
+
+    with mock.patch.object(
+        executor,
+        "execute_result",
+        wraps=executor.execute_result,
+    ) as execute_result:
+        created = await Book.objects.abulk_create(books, batch_size=2)
+
+    assert created == books
+    assert all(book.pk is not None for book in books)
+    assert execute_result.await_count == 2
+
+    for book in books:
+        book.name = f"Updated {book.name}"
+
+    with mock.patch.object(
+        executor,
+        "execute_result",
+        wraps=executor.execute_result,
+    ) as execute_result:
+        rows_updated = await Book.objects.abulk_update(
+            books,
+            ["name"],
+            batch_size=2,
+        )
+
+    names = [
+        name
+        async for name in Book.objects.order_by("name").values_list("name", flat=True)
+    ]
+    assert rows_updated == 3
+    assert names == ["Updated First", "Updated Second", "Updated Third"]
+    assert execute_result.await_count == 2

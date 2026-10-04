@@ -7,11 +7,13 @@ from psycopg.conninfo import make_conninfo
 from django_native_postgres.cursor import NativeAsyncCursor
 from django_native_postgres.executor import NativeExecutor
 from django_native_postgres.features import DatabaseFeatures
+from django_native_postgres.operations import DatabaseOperations
 
 
 class DatabaseWrapper(PostgreSQLDatabaseWrapper):
     display_name = "PostgreSQL (native async)"
     features_class = DatabaseFeatures
+    ops_class = DatabaseOperations
 
     def get_async_executor(self):
         executor = getattr(self, "_native_executor", None)
