@@ -8,7 +8,7 @@ use crate::cancellation::CancellationGuard;
 use crate::error::NativeError;
 use crate::parameter::QueryParameter;
 use crate::pool::PoolHandle;
-use crate::postgres::{self, QueryRows};
+use crate::postgres::{self, QueryResult};
 use crate::transaction::{self, TransactionHandle};
 use crate::transaction_options::TransactionOptions;
 use deadpool_postgres::Pool;
@@ -26,7 +26,7 @@ enum Command {
         sql: String,
         params: Vec<QueryParameter>,
         cancellation: oneshot::Receiver<()>,
-        response: oneshot::Sender<Result<QueryRows, NativeError>>,
+        response: oneshot::Sender<Result<QueryResult, NativeError>>,
     },
     BeginTransaction {
         pool: PoolHandle,
@@ -85,7 +85,7 @@ pub(crate) async fn execute(
     pool: PoolHandle,
     sql: String,
     params: Vec<QueryParameter>,
-) -> Result<QueryRows, NativeError> {
+) -> Result<QueryResult, NativeError> {
     let (mut cancellation_guard, cancellation) = CancellationGuard::new();
     let service = RuntimeService::start();
     let (response_tx, response_rx) = oneshot::channel();

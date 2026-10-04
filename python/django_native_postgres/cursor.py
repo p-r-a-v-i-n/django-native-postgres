@@ -9,11 +9,11 @@ type QueryRow = list[str | int | None]
 
 
 class AsyncConnection(Protocol):
-    async def aexecute(
+    async def aexecute_result(
         self,
         sql: str,
         params: Sequence[QueryParameter] | None = None,
-    ) -> list[QueryRow]: ...
+    ) -> tuple[list[QueryRow], int]: ...
 
 
 class NativeAsyncCursor:
@@ -21,10 +21,12 @@ class NativeAsyncCursor:
         self.connection = connection
         self._rows: list[QueryRow] | None = None
         self._position = 0
+        self.rowcount = -1
 
     async def __aenter__(self) -> NativeAsyncCursor:
         self._rows = None
         self._position = 0
+        self.rowcount = -1
         return self
 
     async def __aexit__(
@@ -35,6 +37,7 @@ class NativeAsyncCursor:
     ) -> None:
         self._rows = None
         self._position = 0
+        self.rowcount = -1
 
     async def aexecute(
         self,
@@ -43,7 +46,8 @@ class NativeAsyncCursor:
     ) -> None:
         self._rows = None
         self._position = 0
-        self._rows = await self.connection.aexecute(sql, params)
+        self.rowcount = -1
+        self._rows, self.rowcount = await self.connection.aexecute_result(sql, params)
 
     async def afetchone(self) -> QueryRow | None:
         if self._rows is None:

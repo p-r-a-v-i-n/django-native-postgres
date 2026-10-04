@@ -135,6 +135,28 @@ class NativeTransaction:
             self._rollback_only = True
             raise
 
+    async def execute_result(
+        self,
+        sql: str,
+        params: Sequence[str | int] | None = None,
+    ) -> tuple[list[list[str | int | None]], int]:
+        handle = self._handle
+
+        if handle is None:
+            raise RuntimeError("Native transaction is not active")
+
+        self._validate_usable()
+
+        try:
+            return await _native.execute_transaction_result(
+                transaction=handle,
+                sql=sql,
+                params=params,
+            )
+        except BaseException:
+            self._rollback_only = True
+            raise
+
     async def __aexit__(
         self,
         exception_type: type[BaseException] | None,
@@ -218,6 +240,22 @@ class NativeExecutor:
             return await transaction.execute(sql=sql, params=params)
 
         return await _native.execute(
+            pool=self.pool,
+            sql=sql,
+            params=params,
+        )
+
+    async def execute_result(
+        self,
+        sql: str,
+        params: Sequence[str | int] | None = None,
+    ) -> tuple[list[list[str | int | None]], int]:
+        transaction = self._active_transaction.get()
+
+        if transaction is not None:
+            return await transaction.execute_result(sql=sql, params=params)
+
+        return await _native.execute_result(
             pool=self.pool,
             sql=sql,
             params=params,

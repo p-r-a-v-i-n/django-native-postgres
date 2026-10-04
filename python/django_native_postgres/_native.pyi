@@ -23,6 +23,11 @@ async def execute_transaction(
     sql: str,
     params: Sequence[str | int] | None = None,
 ) -> list[list[str | int | None]]: ...
+async def execute_transaction_result(
+    transaction: TransactionHandle,
+    sql: str,
+    params: Sequence[str | int] | None = None,
+) -> tuple[list[list[str | int | None]], int]: ...
 async def commit_transaction(transaction: TransactionHandle) -> None: ...
 async def rollback_transaction(transaction: TransactionHandle) -> None: ...
 async def execute(
@@ -30,3 +35,8 @@ async def execute(
     sql: str,
     params: Sequence[str | int] | None = None,
 ) -> list[list[str | int | None]]: ...
+async def execute_result(
+    pool: PoolHandle,
+    sql: str,
+    params: Sequence[str | int] | None = None,
+) -> tuple[list[list[str | int | None]], int]: ...

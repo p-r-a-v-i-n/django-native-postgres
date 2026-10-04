@@ -151,13 +151,13 @@ async def test_django_aexists_executes_through_native_backend(
 
     with mock.patch.object(
         executor,
-        "execute",
-        wraps=executor.execute,
-    ) as execute:
+        "execute_result",
+        wraps=executor.execute_result,
+    ) as execute_result:
         result = await Book.objects.filter(name=name).aexists()
 
     assert result is expected
-    execute.assert_awaited_once()
+    execute_result.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -166,13 +166,13 @@ async def test_django_async_iteration_executes_through_native_backend(django_boo
 
     with mock.patch.object(
         executor,
-        "execute",
-        wraps=executor.execute,
-    ) as execute:
+        "execute_result",
+        wraps=executor.execute_result,
+    ) as execute_result:
         books = [book async for book in Book.objects.order_by("name")]
 
     assert [book.name for book in books] == ["Async", "Django", "PostgreSQL"]
-    execute.assert_awaited_once()
+    execute_result.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -181,9 +181,9 @@ async def test_django_async_iteration_supports_values_iterables(django_books):
 
     with mock.patch.object(
         executor,
-        "execute",
-        wraps=executor.execute,
-    ) as execute:
+        "execute_result",
+        wraps=executor.execute_result,
+    ) as execute_result:
         values = [value async for value in Book.objects.order_by("name").values("name")]
         tuples = [
             value async for value in Book.objects.order_by("name").values_list("name")
@@ -206,7 +206,7 @@ async def test_django_async_iteration_supports_values_iterables(django_books):
     assert tuples == [(name,) for name in names]
     assert flat_values == names
     assert [value.name for value in named_values] == names
-    assert execute.await_count == 4
+    assert execute_result.await_count == 4
 
 
 @pytest.mark.asyncio
@@ -243,9 +243,9 @@ async def test_django_async_row_helpers_execute_through_native_backend(django_bo
 
     with mock.patch.object(
         executor,
-        "execute",
-        wraps=executor.execute,
-    ) as execute:
+        "execute_result",
+        wraps=executor.execute_result,
+    ) as execute_result:
         django = await Book.objects.aget(name="Django")
         first = await Book.objects.order_by("name").afirst()
         last = await Book.objects.order_by("name").alast()
@@ -261,7 +261,7 @@ async def test_django_async_row_helpers_execute_through_native_backend(django_bo
     assert latest.name == "PostgreSQL"
     assert contains is True
     assert sorted(book.name for book in books_by_id.values()) == expected_names
-    assert execute.await_count == 7
+    assert execute_result.await_count == 7
 
 
 @pytest.mark.asyncio
@@ -270,9 +270,9 @@ async def test_django_async_scalar_queries_execute_through_native_backend(django
 
     with mock.patch.object(
         executor,
-        "execute",
-        wraps=executor.execute,
-    ) as execute:
+        "execute_result",
+        wraps=executor.execute_result,
+    ) as execute_result:
         count = await Book.objects.acount()
         aggregate = await Book.objects.aaggregate(total=Count("id"))
         explanation = await Book.objects.order_by("name").aexplain()
@@ -280,4 +280,4 @@ async def test_django_async_scalar_queries_execute_through_native_backend(django
     assert count == 3
     assert aggregate == {"total": 3}
     assert "Sort" in explanation
-    assert execute.await_count == 3
+    assert execute_result.await_count == 3

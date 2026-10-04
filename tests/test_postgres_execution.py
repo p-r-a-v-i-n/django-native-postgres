@@ -97,6 +97,44 @@ async def test_execute_returns_text_rows_from_postgres(postgres_pool):
 
 
 @pytest.mark.asyncio
+async def test_execute_result_returns_rows_and_affected_count(postgres_pool):
+    rows, rows_affected = await _native.execute_result(
+        pool=postgres_pool,
+        sql="SELECT value FROM (VALUES (1), (2)) AS example(value)",
+    )
+
+    assert rows == [[1], [2]]
+    assert rows_affected == 2
+
+
+@pytest.mark.asyncio
+async def test_transaction_execute_result_returns_write_count(postgres_pool):
+    transaction = await _native.begin_transaction(postgres_pool)
+
+    await _native.execute_transaction(
+        transaction=transaction,
+        sql="CREATE TEMPORARY TABLE native_result_count (value BIGINT)",
+    )
+    rows, rows_affected = await _native.execute_transaction_result(
+        transaction=transaction,
+        sql="INSERT INTO native_result_count VALUES (1), (2) RETURNING value",
+    )
+
+    assert rows == [[1], [2]]
+    assert rows_affected == 2
+
+    rows, rows_affected = await _native.execute_transaction_result(
+        transaction=transaction,
+        sql="UPDATE native_result_count SET value = value + 1",
+    )
+
+    assert rows == []
+    assert rows_affected == 2
+
+    await _native.rollback_transaction(transaction)
+
+
+@pytest.mark.asyncio
 async def test_execute_reuses_postgres_connection(postgres_pool):
     first_rows = await _native.execute(
         pool=postgres_pool,

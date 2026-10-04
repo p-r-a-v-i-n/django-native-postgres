@@ -119,26 +119,48 @@ async def test_aexecute_forwards_query_to_process_executor():
 
 
 @pytest.mark.asyncio
+async def test_aexecute_result_forwards_query_to_process_executor():
+    connection = connections["default"]
+    executor = mock.Mock()
+    executor.execute_result = mock.AsyncMock(return_value=([], 2))
+    sql = "UPDATE example SET active = %s"
+    params = (True,)
+
+    with mock.patch.object(
+        connection,
+        "get_async_executor",
+        return_value=executor,
+        create=True,
+    ):
+        result = await connection.aexecute_result(sql, params)
+
+    assert result == ([], 2)
+    executor.execute_result.assert_awaited_once_with(sql=sql, params=params)
+    assert connection.connection is None
+
+
+@pytest.mark.asyncio
 async def test_async_cursor_executes_and_fetches_rows():
     connection = mock.Mock()
-    connection.aexecute = mock.AsyncMock(return_value=[[1], [2]])
+    connection.aexecute_result = mock.AsyncMock(return_value=([[1], [2]], 2))
     cursor = NativeAsyncCursor(connection)
 
     async with cursor as opened_cursor:
         result = await opened_cursor.aexecute("SELECT %s", (1,))
 
         assert result is None
+        assert opened_cursor.rowcount == 2
         assert await opened_cursor.afetchone() == [1]
         assert await opened_cursor.afetchone() == [2]
         assert await opened_cursor.afetchone() is None
 
-    connection.aexecute.assert_awaited_once_with("SELECT %s", (1,))
+    connection.aexecute_result.assert_awaited_once_with("SELECT %s", (1,))
 
 
 @pytest.mark.asyncio
 async def test_async_cursor_fetches_remaining_rows():
     connection = mock.Mock()
-    connection.aexecute = mock.AsyncMock(return_value=[[1], [2], [3]])
+    connection.aexecute_result = mock.AsyncMock(return_value=([[1], [2], [3]], 3))
 
     async with NativeAsyncCursor(connection) as cursor:
         await cursor.aexecute("SELECT value FROM example")
@@ -151,7 +173,7 @@ async def test_async_cursor_fetches_remaining_rows():
 @pytest.mark.asyncio
 async def test_async_cursor_fetches_rows_in_chunks():
     connection = mock.Mock()
-    connection.aexecute = mock.AsyncMock(return_value=[[1], [2], [3]])
+    connection.aexecute_result = mock.AsyncMock(return_value=([[1], [2], [3]], 3))
 
     async with NativeAsyncCursor(connection) as cursor:
         await cursor.aexecute("SELECT value FROM example")
