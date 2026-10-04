@@ -8,6 +8,9 @@ pub(crate) enum QueryParameter {
 
     #[pyo3(transparent)]
     Integer(i64),
+
+    #[pyo3(transparent)]
+    Null(Option<String>),
 }
 
 impl QueryParameter {
@@ -15,6 +18,7 @@ impl QueryParameter {
         match self {
             Self::Text(value) => value,
             Self::Integer(value) => value,
+            Self::Null(value) => value,
         }
     }
 
@@ -22,6 +26,7 @@ impl QueryParameter {
         match self {
             Self::Text(_) => Type::TEXT,
             Self::Integer(_) => Type::INT8,
+            Self::Null(_) => Type::UNKNOWN,
         }
     }
 }

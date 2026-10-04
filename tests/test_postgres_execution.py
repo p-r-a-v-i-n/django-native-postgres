@@ -791,6 +791,17 @@ async def test_execute_assigns_type_to_untyped_integer_parameter(
 
 
 @pytest.mark.asyncio
+async def test_execute_accepts_null_parameters(postgres_pool):
+    rows = await _native.execute(
+        pool=postgres_pool,
+        sql="SELECT %s::BIGINT, %s::TEXT",
+        params=(None, None),
+    )
+
+    assert rows == [[None, None]]
+
+
+@pytest.mark.asyncio
 async def test_execute_limits_pool_connections(postgres_database_url):
     await _native.close_pools()
 

@@ -116,7 +116,7 @@ class NativeTransaction:
     async def execute(
         self,
         sql: str,
-        params: Sequence[str | int] | None = None,
+        params: Sequence[str | int | None] | None = None,
     ) -> list[list[str | int | None]]:
         handle = self._handle
 
@@ -138,7 +138,7 @@ class NativeTransaction:
     async def execute_result(
         self,
         sql: str,
-        params: Sequence[str | int] | None = None,
+        params: Sequence[str | int | None] | None = None,
     ) -> tuple[list[list[str | int | None]], int]:
         handle = self._handle
 
@@ -232,7 +232,7 @@ class NativeExecutor:
     async def execute(
         self,
         sql: str,
-        params: Sequence[str | int] | None = None,
+        params: Sequence[str | int | None] | None = None,
     ) -> list[list[str | int | None]]:
         transaction = self._active_transaction.get()
 
@@ -248,7 +248,7 @@ class NativeExecutor:
     async def execute_result(
         self,
         sql: str,
-        params: Sequence[str | int] | None = None,
+        params: Sequence[str | int | None] | None = None,
     ) -> tuple[list[list[str | int | None]], int]:
         transaction = self._active_transaction.get()
 
