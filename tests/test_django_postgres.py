@@ -4,6 +4,7 @@ from unittest import mock
 
 import pytest
 from django.db import connections
+from django.db.models import Count
 from django_native_postgres import _native
 from psycopg.conninfo import make_conninfo
 
@@ -251,9 +252,7 @@ async def test_django_async_row_helpers_execute_through_native_backend(django_bo
         earliest = await Book.objects.aearliest("name")
         latest = await Book.objects.alatest("name")
         contains = await Book.objects.acontains(django)
-        books_by_id = await Book.objects.ain_bulk(
-            [book.pk for book in django_books]
-        )
+        books_by_id = await Book.objects.ain_bulk([book.pk for book in django_books])
 
     assert django.name == "Django"
     assert first.name == "Async"
@@ -263,3 +262,22 @@ async def test_django_async_row_helpers_execute_through_native_backend(django_bo
     assert contains is True
     assert sorted(book.name for book in books_by_id.values()) == expected_names
     assert execute.await_count == 7
+
+
+@pytest.mark.asyncio
+async def test_django_async_scalar_queries_execute_through_native_backend(django_books):
+    executor = connections["default"].get_async_executor()
+
+    with mock.patch.object(
+        executor,
+        "execute",
+        wraps=executor.execute,
+    ) as execute:
+        count = await Book.objects.acount()
+        aggregate = await Book.objects.aaggregate(total=Count("id"))
+        explanation = await Book.objects.order_by("name").aexplain()
+
+    assert count == 3
+    assert aggregate == {"total": 3}
+    assert "Sort" in explanation
+    assert execute.await_count == 3
