@@ -233,3 +233,33 @@ async def test_django_aiterator_can_be_closed_early(django_books):
         async for name in Book.objects.order_by("name").values_list("name", flat=True)
     ]
     assert names == ["Async", "Django", "PostgreSQL"]
+
+
+@pytest.mark.asyncio
+async def test_django_async_row_helpers_execute_through_native_backend(django_books):
+    executor = connections["default"].get_async_executor()
+    expected_names = ["Async", "Django", "PostgreSQL"]
+
+    with mock.patch.object(
+        executor,
+        "execute",
+        wraps=executor.execute,
+    ) as execute:
+        django = await Book.objects.aget(name="Django")
+        first = await Book.objects.order_by("name").afirst()
+        last = await Book.objects.order_by("name").alast()
+        earliest = await Book.objects.aearliest("name")
+        latest = await Book.objects.alatest("name")
+        contains = await Book.objects.acontains(django)
+        books_by_id = await Book.objects.ain_bulk(
+            [book.pk for book in django_books]
+        )
+
+    assert django.name == "Django"
+    assert first.name == "Async"
+    assert last.name == "PostgreSQL"
+    assert earliest.name == "Async"
+    assert latest.name == "PostgreSQL"
+    assert contains is True
+    assert sorted(book.name for book in books_by_id.values()) == expected_names
+    assert execute.await_count == 7
