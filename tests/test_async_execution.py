@@ -136,12 +136,44 @@ async def test_async_cursor_executes_and_fetches_rows():
 
 
 @pytest.mark.asyncio
+async def test_async_cursor_fetches_remaining_rows():
+    connection = mock.Mock()
+    connection.aexecute = mock.AsyncMock(return_value=[[1], [2], [3]])
+
+    async with NativeAsyncCursor(connection) as cursor:
+        await cursor.aexecute("SELECT value FROM example")
+
+        assert await cursor.afetchone() == [1]
+        assert await cursor.afetchall() == [[2], [3]]
+        assert await cursor.afetchall() == []
+
+
+@pytest.mark.asyncio
+async def test_async_cursor_fetches_rows_in_chunks():
+    connection = mock.Mock()
+    connection.aexecute = mock.AsyncMock(return_value=[[1], [2], [3]])
+
+    async with NativeAsyncCursor(connection) as cursor:
+        await cursor.aexecute("SELECT value FROM example")
+
+        assert await cursor.afetchmany(2) == [[1], [2]]
+        assert await cursor.afetchmany(2) == [[3]]
+        assert await cursor.afetchmany(2) == []
+
+
+@pytest.mark.asyncio
 async def test_async_cursor_cannot_fetch_without_an_active_result():
     cursor = NativeAsyncCursor(mock.Mock())
     message = "No active query result on this cursor"
 
     with pytest.raises(RuntimeError, match=message):
         await cursor.afetchone()
+
+    with pytest.raises(RuntimeError, match=message):
+        await cursor.afetchmany(1)
+
+    with pytest.raises(RuntimeError, match=message):
+        await cursor.afetchall()
 
     async with cursor:
         pass
