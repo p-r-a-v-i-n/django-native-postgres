@@ -66,6 +66,9 @@ class DatabaseWrapper(PostgreSQLDatabaseWrapper):
     def acursor(self):
         return NativeAsyncCursor(self)
 
+    def atransaction(self):
+        return self.get_async_executor().transaction()
+
     def get_connection_params(self):
         connection_params = super().get_connection_params()
         connection_params.pop("native_pool", None)

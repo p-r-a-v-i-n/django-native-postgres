@@ -301,3 +301,24 @@ async def test_django_aupdate_executes_through_native_backend(django_books):
     assert rows_updated == 1
     assert names == ["Async", "PostgreSQL", "Updated"]
     execute_result.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_django_acreate_and_asave_execute_through_native_backend(
+    transactional_db,
+):
+    executor = connections["default"].get_async_executor()
+
+    with mock.patch.object(
+        executor,
+        "execute_result",
+        wraps=executor.execute_result,
+    ) as execute_result:
+        book = await Book.objects.acreate(name="Created")
+        book.name = "Saved"
+        await book.asave(update_fields=["name"])
+
+    saved = await Book.objects.aget(pk=book.pk)
+    assert book.pk is not None
+    assert saved.name == "Saved"
+    assert execute_result.await_count == 2
