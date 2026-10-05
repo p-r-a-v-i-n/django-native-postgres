@@ -1,3 +1,5 @@
+from django.contrib.contenttypes.fields import GenericForeignKey, GenericRelation
+from django.contrib.contenttypes.models import ContentType
 from django.db import models
 
 
@@ -90,3 +92,26 @@ class Membership(models.Model):
                 name="unique_club_member",
             )
         ]
+
+
+class GenericOwner(models.Model):
+    name = models.CharField(max_length=200)
+    notes = GenericRelation(
+        "GenericNote",
+        related_query_name="generic_owners",
+    )
+
+
+class GenericOtherOwner(models.Model):
+    name = models.CharField(max_length=200)
+    notes = GenericRelation(
+        "GenericNote",
+        related_query_name="generic_other_owners",
+    )
+
+
+class GenericNote(models.Model):
+    content_type = models.ForeignKey(ContentType, on_delete=models.CASCADE)
+    object_id = models.PositiveBigIntegerField()
+    content_object = GenericForeignKey()
+    text = models.CharField(max_length=200)

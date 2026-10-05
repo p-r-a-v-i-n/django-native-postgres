@@ -3,6 +3,8 @@ import os
 from unittest import mock
 
 import pytest
+from django.contrib.contenttypes.models import ContentType
+from django.contrib.contenttypes.prefetch import GenericPrefetch
 from django.core.exceptions import FieldDoesNotExist
 from django.db import IntegrityError, connections, transaction
 from django.db.models import Count, Prefetch, aprefetch_related_objects
@@ -20,6 +22,9 @@ from tests.integration_app.models import (
     CascadeGrandchild,
     Club,
     DeletionParent,
+    GenericNote,
+    GenericOtherOwner,
+    GenericOwner,
     Member,
     Membership,
     NullableChild,
@@ -922,6 +927,182 @@ async def test_django_aprefetch_related_objects_uses_native_backend(transactiona
 
     assert tags == [tag]
     execute_with_metadata.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_django_content_type_async_manager_uses_native_backend(transactional_db):
+    ContentType.objects.clear_cache()
+    executor = connections["default"].get_async_executor()
+
+    with mock.patch.object(
+        executor,
+        "execute_with_metadata",
+        wraps=executor.execute_with_metadata,
+    ) as execute_with_metadata:
+        content_type = await ContentType.objects.aget_for_model(GenericOwner)
+
+    assert content_type.model_class() is GenericOwner
+    assert execute_with_metadata.await_count == 1
+
+    with mock.patch.object(
+        executor,
+        "execute_with_metadata",
+        wraps=executor.execute_with_metadata,
+    ) as execute_with_metadata:
+        cached_by_model = await ContentType.objects.aget_for_model(GenericOwner)
+        cached_by_id = await ContentType.objects.aget_for_id(content_type.pk)
+
+    assert cached_by_model is content_type
+    assert cached_by_id is content_type
+    execute_with_metadata.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_django_generic_relation_manager_access_does_not_query_database(
+    transactional_db,
+):
+    owner = await GenericOwner.objects.acreate(name="owner")
+    ContentType.objects.clear_cache()
+    executor = connections["default"].get_async_executor()
+
+    with mock.patch.object(
+        executor,
+        "execute_with_metadata",
+        wraps=executor.execute_with_metadata,
+    ) as execute_with_metadata:
+        manager = owner.notes
+
+    assert manager.instance is owner
+    execute_with_metadata.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_django_generic_relation_async_manager_writes(transactional_db):
+    owner = await GenericOwner.objects.acreate(name="owner")
+    other = await GenericOtherOwner.objects.acreate(name="other")
+
+    first = await owner.notes.acreate(text="first")
+    fetched, created = await owner.notes.aget_or_create(text="first")
+    assert fetched == first
+    assert created is False
+
+    first, created = await owner.notes.aupdate_or_create(
+        pk=first.pk,
+        defaults={"text": "updated"},
+    )
+    assert created is False
+    assert first.text == "updated"
+
+    bulk_note = await other.notes.acreate(text="bulk")
+    await owner.notes.aadd(bulk_note)
+    assert await owner.notes.filter(pk=bulk_note.pk).aexists()
+
+    saved_note = await other.notes.acreate(text="saved")
+    await owner.notes.aadd(saved_note, bulk=False)
+    assert await owner.notes.filter(pk=saved_note.pk).aexists()
+
+    await owner.notes.aremove(bulk_note)
+    assert not await GenericNote.objects.filter(pk=bulk_note.pk).aexists()
+
+    retained = owner.notes.filter(pk=saved_note.pk)
+    await owner.notes.aset(retained)
+    assert [note async for note in owner.notes.all()] == [saved_note]
+
+    await owner.notes.aclear(bulk=False)
+    assert not await owner.notes.aexists()
+
+
+@pytest.mark.asyncio
+async def test_django_generic_relation_async_manager_validates_objects(
+    transactional_db,
+):
+    owner = await GenericOwner.objects.acreate(name="owner")
+    unsaved = GenericNote(text="unsaved")
+
+    with pytest.raises(ValueError, match="instance isn't saved"):
+        await owner.notes.aadd(unsaved)
+    with pytest.raises(TypeError, match="'GenericNote' instance expected"):
+        await owner.notes.aadd(owner)
+
+
+@pytest.mark.asyncio
+async def test_django_async_prefetch_supports_generic_relations(transactional_db):
+    first_owner = await GenericOwner.objects.acreate(name="first")
+    second_owner = await GenericOwner.objects.acreate(name="second")
+    await first_owner.notes.acreate(text="first-note")
+    await second_owner.notes.acreate(text="second-note")
+    executor = connections["default"].get_async_executor()
+
+    with mock.patch.object(
+        executor,
+        "execute_with_metadata",
+        wraps=executor.execute_with_metadata,
+    ) as execute_with_metadata:
+        owners = [
+            owner
+            async for owner in GenericOwner.objects.order_by("name").prefetch_related(
+                "notes"
+            )
+        ]
+        note_texts = [
+            [note.text async for note in owner.notes.all()] for owner in owners
+        ]
+
+    assert note_texts == [["first-note"], ["second-note"]]
+    assert execute_with_metadata.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_django_async_prefetch_supports_generic_foreign_keys(
+    transactional_db,
+):
+    owner = await GenericOwner.objects.acreate(name="owner")
+    other = await GenericOtherOwner.objects.acreate(name="other")
+    owner_note = await owner.notes.acreate(text="owner-note")
+    other_note = await other.notes.acreate(text="other-note")
+    ContentType.objects.clear_cache()
+    executor = connections["default"].get_async_executor()
+
+    with mock.patch.object(
+        executor,
+        "execute_with_metadata",
+        wraps=executor.execute_with_metadata,
+    ) as execute_with_metadata:
+        notes = [
+            note
+            async for note in GenericNote.objects.order_by("text").prefetch_related(
+                "content_object"
+            )
+        ]
+        content_objects = [note.content_object for note in notes]
+
+    assert notes == [other_note, owner_note]
+    assert content_objects == [other, owner]
+    assert execute_with_metadata.await_count == 5
+
+
+@pytest.mark.asyncio
+async def test_django_async_generic_foreign_key_prefetch_supports_custom_querysets(
+    transactional_db,
+):
+    owner = await GenericOwner.objects.acreate(name="included")
+    other = await GenericOwner.objects.acreate(name="excluded")
+    included_note = await owner.notes.acreate(text="included")
+    excluded_note = await other.notes.acreate(text="excluded")
+
+    notes = [
+        note
+        async for note in GenericNote.objects.order_by("text").prefetch_related(
+            GenericPrefetch(
+                "content_object",
+                [GenericOwner.objects.filter(name="included")],
+            )
+        )
+    ]
+
+    assert notes == [excluded_note, included_note]
+    assert notes[0].content_object is None
+    assert notes[1].content_object == owner
 
 
 @pytest.mark.asyncio
