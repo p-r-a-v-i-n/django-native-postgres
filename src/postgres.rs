@@ -20,10 +20,12 @@ pub(crate) enum QueryValue {
 }
 
 pub(crate) type QueryRows = Vec<Vec<Option<QueryValue>>>;
+pub(crate) type QueryColumns = Vec<String>;
 
 pub(crate) struct QueryResult {
     pub(crate) rows: QueryRows,
     pub(crate) rows_affected: u64,
+    pub(crate) columns: QueryColumns,
 }
 
 fn query_error_allows_connection_reuse(error: &tokio_postgres::Error) -> bool {
@@ -147,6 +149,15 @@ where
     }
 
     let rows_affected = rows.rows_affected().unwrap_or(0);
+    let columns = postgres_rows
+        .first()
+        .map(|row| {
+            row.columns()
+                .iter()
+                .map(|column| column.name().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
 
     let mut decoded_rows = Vec::with_capacity(postgres_rows.len());
 
@@ -192,6 +203,7 @@ where
     Ok(QueryResult {
         rows: decoded_rows,
         rows_affected,
+        columns,
     })
 }
 

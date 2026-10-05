@@ -65,6 +65,10 @@ class DatabaseWrapper(PostgreSQLDatabaseWrapper):
         executor = self.get_async_executor()
         return await executor.execute_result(sql=sql, params=params)
 
+    async def aexecute_with_metadata(self, sql, params=None):
+        executor = self.get_async_executor()
+        return await executor.execute_with_metadata(sql=sql, params=params)
+
     def acursor(self):
         return NativeAsyncCursor(self)
 

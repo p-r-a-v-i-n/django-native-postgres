@@ -140,9 +140,32 @@ async def test_aexecute_result_forwards_query_to_process_executor():
 
 
 @pytest.mark.asyncio
+async def test_aexecute_with_metadata_forwards_query_to_process_executor():
+    connection = connections["default"]
+    executor = mock.Mock()
+    executor.execute_with_metadata = mock.AsyncMock(return_value=([[1]], 1, ["value"]))
+
+    with mock.patch.object(
+        connection,
+        "get_async_executor",
+        return_value=executor,
+        create=True,
+    ):
+        result = await connection.aexecute_with_metadata("SELECT %s", (1,))
+
+    assert result == ([[1]], 1, ["value"])
+    executor.execute_with_metadata.assert_awaited_once_with(
+        sql="SELECT %s", params=(1,)
+    )
+    assert connection.connection is None
+
+
+@pytest.mark.asyncio
 async def test_async_cursor_executes_and_fetches_rows():
     connection = mock.Mock()
-    connection.aexecute_result = mock.AsyncMock(return_value=([[1], [2]], 2))
+    connection.aexecute_with_metadata = mock.AsyncMock(
+        return_value=([[1], [2]], 2, ["value"])
+    )
     cursor = NativeAsyncCursor(connection)
 
     async with cursor as opened_cursor:
@@ -150,17 +173,22 @@ async def test_async_cursor_executes_and_fetches_rows():
 
         assert result is None
         assert opened_cursor.rowcount == 2
+        assert opened_cursor.description == [
+            ("value", None, None, None, None, None, None)
+        ]
         assert await opened_cursor.afetchone() == [1]
         assert await opened_cursor.afetchone() == [2]
         assert await opened_cursor.afetchone() is None
 
-    connection.aexecute_result.assert_awaited_once_with("SELECT %s", (1,))
+    connection.aexecute_with_metadata.assert_awaited_once_with("SELECT %s", (1,))
 
 
 @pytest.mark.asyncio
 async def test_async_cursor_fetches_remaining_rows():
     connection = mock.Mock()
-    connection.aexecute_result = mock.AsyncMock(return_value=([[1], [2], [3]], 3))
+    connection.aexecute_with_metadata = mock.AsyncMock(
+        return_value=([[1], [2], [3]], 3, ["value"])
+    )
 
     async with NativeAsyncCursor(connection) as cursor:
         await cursor.aexecute("SELECT value FROM example")
@@ -173,7 +201,9 @@ async def test_async_cursor_fetches_remaining_rows():
 @pytest.mark.asyncio
 async def test_async_cursor_fetches_rows_in_chunks():
     connection = mock.Mock()
-    connection.aexecute_result = mock.AsyncMock(return_value=([[1], [2], [3]], 3))
+    connection.aexecute_with_metadata = mock.AsyncMock(
+        return_value=([[1], [2], [3]], 3, ["value"])
+    )
 
     async with NativeAsyncCursor(connection) as cursor:
         await cursor.aexecute("SELECT value FROM example")
@@ -494,6 +524,60 @@ async def test_executor_routes_queries_through_active_transaction():
     execute.assert_awaited_once_with(
         pool=pool,
         sql="SELECT 'pool'",
+        params=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_executor_routes_metadata_queries_through_active_transaction():
+    pool = object()
+    handle = object()
+    transaction_result = ([["transaction"]], 1, ["source"])
+    pool_result = ([["pool"]], 1, ["source"])
+
+    with (
+        mock.patch(
+            "django_native_postgres.executor._native.create_pool",
+            return_value=pool,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.begin_transaction",
+            new=mock.AsyncMock(return_value=handle),
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.execute_transaction_with_metadata",
+            new=mock.AsyncMock(return_value=transaction_result),
+        ) as execute_transaction_with_metadata,
+        mock.patch(
+            "django_native_postgres.executor._native.execute_with_metadata",
+            new=mock.AsyncMock(return_value=pool_result),
+        ) as execute_with_metadata,
+        mock.patch(
+            "django_native_postgres.executor._native.commit_transaction",
+            new=mock.AsyncMock(),
+        ),
+    ):
+        executor = NativeExecutor(database_url="postgresql://example")
+
+        async with executor.transaction():
+            active_result = await executor.execute_with_metadata(
+                sql="SELECT 'transaction' AS source"
+            )
+
+        inactive_result = await executor.execute_with_metadata(
+            sql="SELECT 'pool' AS source"
+        )
+
+    assert active_result is transaction_result
+    assert inactive_result is pool_result
+    execute_transaction_with_metadata.assert_awaited_once_with(
+        transaction=handle,
+        sql="SELECT 'transaction' AS source",
+        params=None,
+    )
+    execute_with_metadata.assert_awaited_once_with(
+        pool=pool,
+        sql="SELECT 'pool' AS source",
         params=None,
     )
 

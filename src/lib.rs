@@ -87,6 +87,18 @@ async fn execute_transaction_result(
         .map_err(to_python_error)
 }
 
+#[pyfunction(signature = (transaction, sql, params=None))]
+async fn execute_transaction_with_metadata(
+    transaction: Py<transaction::TransactionHandle>,
+    sql: String,
+    params: Option<Vec<parameter::QueryParameter>>,
+) -> PyResult<(postgres::QueryRows, u64, postgres::QueryColumns)> {
+    transaction::execute(transaction.get().clone(), sql, params.unwrap_or_default())
+        .await
+        .map(|result| (result.rows, result.rows_affected, result.columns))
+        .map_err(to_python_error)
+}
+
 #[pyfunction]
 async fn commit_transaction(transaction: Py<transaction::TransactionHandle>) -> PyResult<()> {
     transaction::commit(transaction.get().clone())
@@ -125,6 +137,18 @@ async fn execute_result(
         .map_err(to_python_error)
 }
 
+#[pyfunction(signature = (pool, sql, params=None))]
+async fn execute_with_metadata(
+    pool: Py<pool::PoolHandle>,
+    sql: String,
+    params: Option<Vec<parameter::QueryParameter>>,
+) -> PyResult<(postgres::QueryRows, u64, postgres::QueryColumns)> {
+    runtime::execute(pool.get().clone(), sql, params.unwrap_or_default())
+        .await
+        .map(|result| (result.rows, result.rows_affected, result.columns))
+        .map_err(to_python_error)
+}
+
 #[pyfunction]
 async fn close_pools() -> PyResult<()> {
     runtime::close_pools().await.map_err(to_python_error)
@@ -143,12 +167,14 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(runtime_probe, module)?)?;
     module.add_function(wrap_pyfunction!(execute, module)?)?;
     module.add_function(wrap_pyfunction!(execute_result, module)?)?;
+    module.add_function(wrap_pyfunction!(execute_with_metadata, module)?)?;
     module.add_function(wrap_pyfunction!(close_pools, module)?)?;
     module.add_function(wrap_pyfunction!(create_pool, module)?)?;
     module.add_function(wrap_pyfunction!(close_pool, module)?)?;
     module.add_function(wrap_pyfunction!(begin_transaction, module)?)?;
     module.add_function(wrap_pyfunction!(execute_transaction, module)?)?;
     module.add_function(wrap_pyfunction!(execute_transaction_result, module)?)?;
+    module.add_function(wrap_pyfunction!(execute_transaction_with_metadata, module)?)?;
     module.add_function(wrap_pyfunction!(commit_transaction, module)?)?;
     module.add_function(wrap_pyfunction!(rollback_transaction, module)?)?;
     Ok(())

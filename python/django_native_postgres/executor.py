@@ -174,6 +174,30 @@ class NativeTransaction:
             self._rollback_only = True
             raise
 
+    async def execute_with_metadata(
+        self,
+        sql: str,
+        params: Sequence[str | int | None] | None = None,
+    ) -> tuple[list[list[str | int | None]], int, list[str]]:
+        handle = self._handle
+
+        if handle is None:
+            raise RuntimeError("Native transaction is not active")
+
+        self._validate_usable()
+
+        try:
+            return await _translate_integrity_error(
+                _native.execute_transaction_with_metadata(
+                    transaction=handle,
+                    sql=sql,
+                    params=params,
+                )
+            )
+        except BaseException:
+            self._rollback_only = True
+            raise
+
     async def __aexit__(
         self,
         exception_type: type[BaseException] | None,
@@ -284,6 +308,24 @@ class NativeExecutor:
 
         return await _translate_integrity_error(
             _native.execute_result(
+                pool=self.pool,
+                sql=sql,
+                params=params,
+            )
+        )
+
+    async def execute_with_metadata(
+        self,
+        sql: str,
+        params: Sequence[str | int | None] | None = None,
+    ) -> tuple[list[list[str | int | None]], int, list[str]]:
+        transaction = self._active_transaction.get()
+
+        if transaction is not None:
+            return await transaction.execute_with_metadata(sql=sql, params=params)
+
+        return await _translate_integrity_error(
+            _native.execute_with_metadata(
                 pool=self.pool,
                 sql=sql,
                 params=params,

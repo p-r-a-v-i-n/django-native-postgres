@@ -3,6 +3,7 @@ import os
 from unittest import mock
 
 import pytest
+from django.core.exceptions import FieldDoesNotExist
 from django.db import IntegrityError, connections
 from django.db.models import Count, Prefetch, aprefetch_related_objects
 from django.db.models.deletion import ProtectedError, RestrictedError
@@ -181,13 +182,13 @@ async def test_django_aexists_executes_through_native_backend(
 
     with mock.patch.object(
         executor,
-        "execute_result",
-        wraps=executor.execute_result,
-    ) as execute_result:
+        "execute_with_metadata",
+        wraps=executor.execute_with_metadata,
+    ) as execute_with_metadata:
         result = await Book.objects.filter(name=name).aexists()
 
     assert result is expected
-    execute_result.assert_awaited_once()
+    execute_with_metadata.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -196,13 +197,13 @@ async def test_django_async_iteration_executes_through_native_backend(django_boo
 
     with mock.patch.object(
         executor,
-        "execute_result",
-        wraps=executor.execute_result,
-    ) as execute_result:
+        "execute_with_metadata",
+        wraps=executor.execute_with_metadata,
+    ) as execute_with_metadata:
         books = [book async for book in Book.objects.order_by("name")]
 
     assert [book.name for book in books] == ["Async", "Django", "PostgreSQL"]
-    execute_result.assert_awaited_once()
+    execute_with_metadata.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -211,9 +212,9 @@ async def test_django_async_iteration_supports_values_iterables(django_books):
 
     with mock.patch.object(
         executor,
-        "execute_result",
-        wraps=executor.execute_result,
-    ) as execute_result:
+        "execute_with_metadata",
+        wraps=executor.execute_with_metadata,
+    ) as execute_with_metadata:
         values = [value async for value in Book.objects.order_by("name").values("name")]
         tuples = [
             value async for value in Book.objects.order_by("name").values_list("name")
@@ -236,7 +237,7 @@ async def test_django_async_iteration_supports_values_iterables(django_books):
     assert tuples == [(name,) for name in names]
     assert flat_values == names
     assert [value.name for value in named_values] == names
-    assert execute_result.await_count == 4
+    assert execute_with_metadata.await_count == 4
 
 
 @pytest.mark.asyncio
@@ -273,9 +274,9 @@ async def test_django_async_row_helpers_execute_through_native_backend(django_bo
 
     with mock.patch.object(
         executor,
-        "execute_result",
-        wraps=executor.execute_result,
-    ) as execute_result:
+        "execute_with_metadata",
+        wraps=executor.execute_with_metadata,
+    ) as execute_with_metadata:
         django = await Book.objects.aget(name="Django")
         first = await Book.objects.order_by("name").afirst()
         last = await Book.objects.order_by("name").alast()
@@ -291,7 +292,7 @@ async def test_django_async_row_helpers_execute_through_native_backend(django_bo
     assert latest.name == "PostgreSQL"
     assert contains is True
     assert sorted(book.name for book in books_by_id.values()) == expected_names
-    assert execute_result.await_count == 7
+    assert execute_with_metadata.await_count == 7
 
 
 @pytest.mark.asyncio
@@ -300,9 +301,9 @@ async def test_django_async_scalar_queries_execute_through_native_backend(django
 
     with mock.patch.object(
         executor,
-        "execute_result",
-        wraps=executor.execute_result,
-    ) as execute_result:
+        "execute_with_metadata",
+        wraps=executor.execute_with_metadata,
+    ) as execute_with_metadata:
         count = await Book.objects.acount()
         aggregate = await Book.objects.aaggregate(total=Count("id"))
         explanation = await Book.objects.order_by("name").aexplain()
@@ -310,7 +311,7 @@ async def test_django_async_scalar_queries_execute_through_native_backend(django
     assert count == 3
     assert aggregate == {"total": 3}
     assert "Sort" in explanation
-    assert execute_result.await_count == 3
+    assert execute_with_metadata.await_count == 3
 
 
 @pytest.mark.asyncio
@@ -319,9 +320,9 @@ async def test_django_aupdate_executes_through_native_backend(django_books):
 
     with mock.patch.object(
         executor,
-        "execute_result",
-        wraps=executor.execute_result,
-    ) as execute_result:
+        "execute_with_metadata",
+        wraps=executor.execute_with_metadata,
+    ) as execute_with_metadata:
         rows_updated = await Book.objects.filter(name="Django").aupdate(name="Updated")
 
     names = [
@@ -330,7 +331,7 @@ async def test_django_aupdate_executes_through_native_backend(django_books):
     ]
     assert rows_updated == 1
     assert names == ["Async", "PostgreSQL", "Updated"]
-    execute_result.assert_awaited_once()
+    execute_with_metadata.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -341,9 +342,9 @@ async def test_django_acreate_and_asave_execute_through_native_backend(
 
     with mock.patch.object(
         executor,
-        "execute_result",
-        wraps=executor.execute_result,
-    ) as execute_result:
+        "execute_with_metadata",
+        wraps=executor.execute_with_metadata,
+    ) as execute_with_metadata:
         book = await Book.objects.acreate(name="Created")
         book.name = "Saved"
         await book.asave(update_fields=["name"])
@@ -351,7 +352,7 @@ async def test_django_acreate_and_asave_execute_through_native_backend(
     saved = await Book.objects.aget(pk=book.pk)
     assert book.pk is not None
     assert saved.name == "Saved"
-    assert execute_result.await_count == 2
+    assert execute_with_metadata.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -363,23 +364,23 @@ async def test_django_async_bulk_writes_execute_through_native_backend(
 
     with mock.patch.object(
         executor,
-        "execute_result",
-        wraps=executor.execute_result,
-    ) as execute_result:
+        "execute_with_metadata",
+        wraps=executor.execute_with_metadata,
+    ) as execute_with_metadata:
         created = await Book.objects.abulk_create(books, batch_size=2)
 
     assert created == books
     assert all(book.pk is not None for book in books)
-    assert execute_result.await_count == 2
+    assert execute_with_metadata.await_count == 2
 
     for book in books:
         book.name = f"Updated {book.name}"
 
     with mock.patch.object(
         executor,
-        "execute_result",
-        wraps=executor.execute_result,
-    ) as execute_result:
+        "execute_with_metadata",
+        wraps=executor.execute_with_metadata,
+    ) as execute_with_metadata:
         rows_updated = await Book.objects.abulk_update(
             books,
             ["name"],
@@ -392,7 +393,7 @@ async def test_django_async_bulk_writes_execute_through_native_backend(
     ]
     assert rows_updated == 3
     assert names == ["Updated First", "Updated Second", "Updated Third"]
-    assert execute_result.await_count == 2
+    assert execute_with_metadata.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -510,13 +511,13 @@ async def test_django_arefresh_from_db_executes_through_native_backend(django_bo
 
     with mock.patch.object(
         executor,
-        "execute_result",
-        wraps=executor.execute_result,
-    ) as execute_result:
+        "execute_with_metadata",
+        wraps=executor.execute_with_metadata,
+    ) as execute_with_metadata:
         await django_book.arefresh_from_db(fields=["name"])
 
     assert django_book.name == "Refreshed"
-    execute_result.assert_awaited_once()
+    execute_with_metadata.assert_awaited_once()
 
     with pytest.raises(Book.DoesNotExist):
         await django_book.arefresh_from_db(
@@ -745,9 +746,9 @@ async def test_django_async_prefetch_uses_native_backend(transactional_db):
 
     with mock.patch.object(
         executor,
-        "execute_result",
-        wraps=executor.execute_result,
-    ) as execute_result:
+        "execute_with_metadata",
+        wraps=executor.execute_with_metadata,
+    ) as execute_with_metadata:
         articles = [
             article
             async for article in Article.objects.order_by("title").prefetch_related(
@@ -760,7 +761,7 @@ async def test_django_async_prefetch_uses_native_backend(transactional_db):
         ]
 
     assert tag_names == [["first", "second"], ["second"]]
-    assert execute_result.await_count == 2
+    assert execute_with_metadata.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -806,9 +807,9 @@ async def test_django_async_prefetch_preserves_reverse_foreign_key_cache(
 
     with mock.patch.object(
         executor,
-        "execute_result",
-        wraps=executor.execute_result,
-    ) as execute_result:
+        "execute_with_metadata",
+        wraps=executor.execute_with_metadata,
+    ) as execute_with_metadata:
         fetched_parent = await DeletionParent.objects.prefetch_related(
             "cascadechild_set"
         ).aget(pk=parent.pk)
@@ -816,7 +817,7 @@ async def test_django_async_prefetch_preserves_reverse_foreign_key_cache(
         child_parent = children[0].parent
 
     assert child_parent is fetched_parent
-    assert execute_result.await_count == 2
+    assert execute_with_metadata.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -829,11 +830,79 @@ async def test_django_aprefetch_related_objects_uses_native_backend(transactiona
 
     with mock.patch.object(
         executor,
-        "execute_result",
-        wraps=executor.execute_result,
-    ) as execute_result:
+        "execute_with_metadata",
+        wraps=executor.execute_with_metadata,
+    ) as execute_with_metadata:
         await aprefetch_related_objects(articles, "tags")
         tags = [item async for item in articles[0].tags.all()]
 
     assert tags == [tag]
-    execute_result.assert_awaited_once()
+    execute_with_metadata.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_django_raw_query_executes_through_native_backend(transactional_db):
+    await Book.objects.acreate(name="Django")
+    executor = connections["default"].get_async_executor()
+    sql = (
+        'SELECT "id", "name" AS "book_name", "name" AS "label" '
+        'FROM "integration_app_book" WHERE "name" = %s'
+    )
+
+    with mock.patch.object(
+        executor,
+        "execute_with_metadata",
+        wraps=executor.execute_with_metadata,
+    ) as execute_with_metadata:
+        books = [
+            book
+            async for book in Book.objects.raw(
+                sql,
+                ["Django"],
+                translations={"book_name": "name"},
+            )
+        ]
+
+    assert [book.name for book in books] == ["Django"]
+    assert books[0].label == "Django"
+    execute_with_metadata.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_django_raw_query_supports_prefetch_and_empty_results(transactional_db):
+    article = await Article.objects.acreate(title="article")
+    tag = await Tag.objects.acreate(name="tag")
+    await article.tags.aadd(tag)
+    sql = 'SELECT "id", "title" FROM "integration_app_article" WHERE "id" = %s'
+    executor = connections["default"].get_async_executor()
+
+    with mock.patch.object(
+        executor,
+        "execute_with_metadata",
+        wraps=executor.execute_with_metadata,
+    ) as execute_with_metadata:
+        articles = [
+            item
+            async for item in Article.objects.raw(sql, [article.pk]).prefetch_related(
+                "tags"
+            )
+        ]
+        tags = [item async for item in articles[0].tags.all()]
+        missing = [item async for item in Article.objects.raw(sql, [-1])]
+
+    assert tags == [tag]
+    assert missing == []
+    assert execute_with_metadata.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_django_raw_query_requires_primary_key(transactional_db):
+    await Book.objects.acreate(name="Django")
+
+    with pytest.raises(FieldDoesNotExist, match="must include the primary key"):
+        _ = [
+            book
+            async for book in Book.objects.raw(
+                'SELECT "name" FROM "integration_app_book"'
+            )
+        ]

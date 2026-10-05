@@ -109,6 +109,35 @@ async def test_execute_result_returns_rows_and_affected_count(postgres_pool):
 
 
 @pytest.mark.asyncio
+async def test_execute_with_metadata_returns_column_names(postgres_pool):
+    rows, rows_affected, columns = await _native.execute_with_metadata(
+        pool=postgres_pool,
+        sql="SELECT 1::BIGINT AS first_value, 'two'::TEXT AS second_value",
+    )
+
+    assert rows == [[1, "two"]]
+    assert rows_affected == 1
+    assert columns == ["first_value", "second_value"]
+
+
+@pytest.mark.asyncio
+async def test_transaction_execute_with_metadata_returns_column_names(postgres_pool):
+    transaction = await _native.begin_transaction(postgres_pool)
+
+    try:
+        rows, rows_affected, columns = await _native.execute_transaction_with_metadata(
+            transaction=transaction,
+            sql="SELECT 1::BIGINT AS value",
+        )
+    finally:
+        await _native.rollback_transaction(transaction)
+
+    assert rows == [[1]]
+    assert rows_affected == 1
+    assert columns == ["value"]
+
+
+@pytest.mark.asyncio
 async def test_transaction_execute_result_returns_write_count(postgres_pool):
     transaction = await _native.begin_transaction(postgres_pool)
 

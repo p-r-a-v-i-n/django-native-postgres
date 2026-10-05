@@ -6,14 +6,15 @@ from typing import Protocol
 
 type QueryParameter = str | int | None
 type QueryRow = list[str | int | None]
+type CursorDescription = tuple[str, None, None, None, None, None, None]
 
 
 class AsyncConnection(Protocol):
-    async def aexecute_result(
+    async def aexecute_with_metadata(
         self,
         sql: str,
         params: Sequence[QueryParameter] | None = None,
-    ) -> tuple[list[QueryRow], int]: ...
+    ) -> tuple[list[QueryRow], int, list[str]]: ...
 
 
 class NativeAsyncCursor:
@@ -22,11 +23,13 @@ class NativeAsyncCursor:
         self._rows: list[QueryRow] | None = None
         self._position = 0
         self.rowcount = -1
+        self.description: list[CursorDescription] | None = None
 
     async def __aenter__(self) -> NativeAsyncCursor:
         self._rows = None
         self._position = 0
         self.rowcount = -1
+        self.description = None
         return self
 
     async def __aexit__(
@@ -38,6 +41,7 @@ class NativeAsyncCursor:
         self._rows = None
         self._position = 0
         self.rowcount = -1
+        self.description = None
 
     async def aexecute(
         self,
@@ -47,7 +51,15 @@ class NativeAsyncCursor:
         self._rows = None
         self._position = 0
         self.rowcount = -1
-        self._rows, self.rowcount = await self.connection.aexecute_result(sql, params)
+        self.description = None
+        (
+            self._rows,
+            self.rowcount,
+            columns,
+        ) = await self.connection.aexecute_with_metadata(sql, params)
+        self.description = [
+            (column, None, None, None, None, None, None) for column in columns
+        ]
 
     async def afetchone(self) -> QueryRow | None:
         if self._rows is None:
