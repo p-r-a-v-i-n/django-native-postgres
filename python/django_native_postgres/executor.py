@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from asyncio import Task, current_task
-from collections.abc import Sequence
+from collections.abc import Awaitable, Sequence
 from contextvars import ContextVar, Token
 from types import TracebackType
 from typing import Literal
+
+from django.db import IntegrityError
 
 from django_native_postgres import _native
 
@@ -14,6 +16,13 @@ type TransactionIsolationLevel = Literal[
     "repeatable_read",
     "serializable",
 ]
+
+
+async def _translate_integrity_error[T](operation: Awaitable[T]) -> T:
+    try:
+        return await operation
+    except _native.PostgresIntegrityError as error:
+        raise IntegrityError(str(error)) from error
 
 
 class NativeTransaction:
@@ -65,11 +74,13 @@ class NativeTransaction:
         active_transaction = self._active_transaction.get()
 
         if active_transaction is None:
-            self._handle = await _native.begin_transaction(
-                self._pool,
-                isolation_level=self._isolation_level,
-                read_only=self._read_only,
-                deferrable=self._deferrable,
+            self._handle = await _translate_integrity_error(
+                _native.begin_transaction(
+                    self._pool,
+                    isolation_level=self._isolation_level,
+                    read_only=self._read_only,
+                    deferrable=self._deferrable,
+                )
             )
             self._owner_task = owner_task
         else:
@@ -99,10 +110,12 @@ class NativeTransaction:
             )
 
             try:
-                await _native.execute_transaction(
-                    transaction=handle,
-                    sql=f"SAVEPOINT {self._savepoint_name}",
-                    params=None,
+                await _translate_integrity_error(
+                    _native.execute_transaction(
+                        transaction=handle,
+                        sql=f"SAVEPOINT {self._savepoint_name}",
+                        params=None,
+                    )
                 )
             except BaseException:
                 self._root._rollback_only = True
@@ -126,10 +139,12 @@ class NativeTransaction:
         self._validate_usable()
 
         try:
-            return await _native.execute_transaction(
-                transaction=handle,
-                sql=sql,
-                params=params,
+            return await _translate_integrity_error(
+                _native.execute_transaction(
+                    transaction=handle,
+                    sql=sql,
+                    params=params,
+                )
             )
         except BaseException:
             self._rollback_only = True
@@ -148,10 +163,12 @@ class NativeTransaction:
         self._validate_usable()
 
         try:
-            return await _native.execute_transaction_result(
-                transaction=handle,
-                sql=sql,
-                params=params,
+            return await _translate_integrity_error(
+                _native.execute_transaction_result(
+                    transaction=handle,
+                    sql=sql,
+                    params=params,
+                )
             )
         except BaseException:
             self._rollback_only = True
@@ -187,20 +204,24 @@ class NativeTransaction:
                 if should_rollback:
                     await _native.rollback_transaction(handle)
                 else:
-                    await _native.commit_transaction(handle)
+                    await _translate_integrity_error(_native.commit_transaction(handle))
             else:
                 try:
                     if should_rollback:
-                        await _native.execute_transaction(
-                            transaction=handle,
-                            sql=f"ROLLBACK TO SAVEPOINT {savepoint_name}",
-                            params=None,
+                        await _translate_integrity_error(
+                            _native.execute_transaction(
+                                transaction=handle,
+                                sql=f"ROLLBACK TO SAVEPOINT {savepoint_name}",
+                                params=None,
+                            )
                         )
 
-                    await _native.execute_transaction(
-                        transaction=handle,
-                        sql=f"RELEASE SAVEPOINT {savepoint_name}",
-                        params=None,
+                    await _translate_integrity_error(
+                        _native.execute_transaction(
+                            transaction=handle,
+                            sql=f"RELEASE SAVEPOINT {savepoint_name}",
+                            params=None,
+                        )
                     )
                 except BaseException:
                     self._root._rollback_only = True
@@ -229,6 +250,10 @@ class NativeExecutor:
             default=None,
         )
 
+    @property
+    def in_transaction(self) -> bool:
+        return self._active_transaction.get() is not None
+
     async def execute(
         self,
         sql: str,
@@ -239,10 +264,12 @@ class NativeExecutor:
         if transaction is not None:
             return await transaction.execute(sql=sql, params=params)
 
-        return await _native.execute(
-            pool=self.pool,
-            sql=sql,
-            params=params,
+        return await _translate_integrity_error(
+            _native.execute(
+                pool=self.pool,
+                sql=sql,
+                params=params,
+            )
         )
 
     async def execute_result(
@@ -255,10 +282,12 @@ class NativeExecutor:
         if transaction is not None:
             return await transaction.execute_result(sql=sql, params=params)
 
-        return await _native.execute_result(
-            pool=self.pool,
-            sql=sql,
-            params=params,
+        return await _translate_integrity_error(
+            _native.execute_result(
+                pool=self.pool,
+                sql=sql,
+                params=params,
+            )
         )
 
     async def close(self) -> None:

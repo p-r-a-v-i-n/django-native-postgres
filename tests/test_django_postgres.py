@@ -3,10 +3,11 @@ import os
 from unittest import mock
 
 import pytest
-from django.db import connections
+from django.db import IntegrityError, connections
 from django.db.models import Count
 from django.db.models.deletion import ProtectedError, RestrictedError
-from django.db.models.signals import post_delete, pre_delete
+from django.db.models.signals import post_delete, pre_delete, pre_save
+from django.db.transaction import TransactionManagementError
 from django_native_postgres import _native
 from psycopg.conninfo import make_conninfo
 
@@ -20,6 +21,7 @@ from tests.integration_app.models import (
     ProtectedChild,
     ProtectedGrandchild,
     RestrictedChild,
+    UniqueRecord,
 )
 
 pytestmark = [
@@ -514,3 +516,72 @@ async def test_django_arefresh_from_db_executes_through_native_backend(django_bo
         await django_book.arefresh_from_db(
             from_queryset=Book.objects.filter(name="missing")
         )
+
+
+@pytest.mark.asyncio
+async def test_django_aget_or_create_recovers_from_concurrent_insert(transactional_db):
+    ready = 0
+    both_ready = asyncio.Event()
+
+    async def wait_for_other_insert(**kwargs):
+        nonlocal ready
+        ready += 1
+        if ready == 2:
+            both_ready.set()
+        await asyncio.wait_for(both_ready.wait(), timeout=5)
+
+    pre_save.connect(wait_for_other_insert, sender=UniqueRecord)
+    try:
+        first = UniqueRecord.objects.aget_or_create(
+            key="shared", defaults={"value": "one"}
+        )
+        second = UniqueRecord.objects.aget_or_create(
+            key="shared", defaults={"value": "one"}
+        )
+        results = await asyncio.gather(
+            first,
+            second,
+        )
+    finally:
+        pre_save.disconnect(wait_for_other_insert, sender=UniqueRecord)
+
+    assert sorted(created for _, created in results) == [False, True]
+    assert results[0][0].pk == results[1][0].pk
+    assert await UniqueRecord.objects.filter(key="shared").acount() == 1
+
+
+@pytest.mark.asyncio
+async def test_django_aupdate_or_create_uses_native_transaction(transactional_db):
+    record, created = await UniqueRecord.objects.aupdate_or_create(
+        key="record",
+        create_defaults={"value": "created"},
+        defaults={"value": "updated"},
+    )
+
+    assert created is True
+    assert record.value == "created"
+
+    record, created = await UniqueRecord.objects.aupdate_or_create(
+        key="record",
+        defaults={"value": "updated"},
+    )
+
+    assert created is False
+    assert record.value == "updated"
+    assert (await UniqueRecord.objects.aget(key="record")).value == "updated"
+
+    with pytest.raises(IntegrityError):
+        await UniqueRecord.objects.aupdate_or_create(
+            key="record",
+            defaults={"value": None},
+        )
+
+    assert (await UniqueRecord.objects.aget(key="record")).value == "updated"
+
+
+@pytest.mark.asyncio
+async def test_django_async_select_for_update_requires_transaction(transactional_db):
+    await UniqueRecord.objects.acreate(key="record", value="value")
+
+    with pytest.raises(TransactionManagementError):
+        await UniqueRecord.objects.select_for_update().aget(key="record")

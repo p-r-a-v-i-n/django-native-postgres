@@ -4,6 +4,8 @@ use crate::error::NativeError;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
+pyo3::create_exception!(_native, PostgresIntegrityError, PyRuntimeError);
+
 mod cancellation;
 mod error;
 mod parameter;
@@ -130,6 +132,10 @@ async fn close_pools() -> PyResult<()> {
 
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add(
+        "PostgresIntegrityError",
+        module.py().get_type::<PostgresIntegrityError>(),
+    )?;
     module.add_class::<pool::PoolHandle>()?;
     module.add_class::<transaction::TransactionHandle>()?;
 
@@ -149,6 +155,16 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 fn to_python_error(error: NativeError) -> PyErr {
+    if matches!(
+        &error,
+        NativeError::PostgresQuery(source)
+            | NativeError::PostgresTransaction { source, .. }
+            if source
+                .code()
+                .is_some_and(|code| code.code().starts_with("23"))
+    ) {
+        return PostgresIntegrityError::new_err(error.to_string());
+    }
     match error {
         error @ NativeError::InvalidTransactionIsolationLevel(_) => {
             PyValueError::new_err(error.to_string())

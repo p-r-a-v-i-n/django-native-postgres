@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from types import TracebackType
 from typing import Protocol
 
-type QueryParameter = str | int
+type QueryParameter = str | int | None
 type QueryRow = list[str | int | None]
 
 

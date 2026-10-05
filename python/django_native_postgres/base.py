@@ -71,6 +71,9 @@ class DatabaseWrapper(PostgreSQLDatabaseWrapper):
     def atransaction(self):
         return self.get_async_executor().transaction()
 
+    def get_async_autocommit(self):
+        return not self.get_async_executor().in_transaction
+
     def get_connection_params(self):
         connection_params = super().get_connection_params()
         connection_params.pop("native_pool", None)

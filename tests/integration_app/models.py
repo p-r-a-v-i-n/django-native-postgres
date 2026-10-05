@@ -47,3 +47,8 @@ class ProtectedChild(models.Model):
 
 class RestrictedChild(models.Model):
     parent = models.ForeignKey(DeletionParent, on_delete=models.RESTRICT)
+
+
+class UniqueRecord(models.Model):
+    key = models.CharField(max_length=200, unique=True)
+    value = models.CharField(max_length=200)
