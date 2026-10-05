@@ -31,6 +31,7 @@ class NativeTransaction:
         pool: _native.PoolHandle,
         active_transaction: ContextVar[NativeTransaction | None],
         *,
+        savepoint: bool = True,
         isolation_level: TransactionIsolationLevel | None = None,
         read_only: bool | None = None,
         deferrable: bool | None = None,
@@ -41,6 +42,8 @@ class NativeTransaction:
         self._token: Token | None = None
         self._used = False
         self._root: NativeTransaction = self
+        self._nested = False
+        self._savepoint = savepoint
         self._savepoint_name: str | None = None
         self._savepoint_number = 0
         self._owner_task: Task[object] | None = None
@@ -48,6 +51,11 @@ class NativeTransaction:
         self._isolation_level = isolation_level
         self._read_only = read_only
         self._deferrable = deferrable
+
+    def _mark_for_rollback(self) -> None:
+        self._rollback_only = True
+        if self._nested and not self._savepoint:
+            self._root._rollback_only = True
 
     def _validate_task(self) -> None:
         if self._root._owner_task is not current_task():
@@ -104,22 +112,25 @@ class NativeTransaction:
                 )
 
             self._root = active_transaction._root
-            self._root._savepoint_number += 1
-            self._savepoint_name = (
-                f"django_native_postgres_savepoint_{self._root._savepoint_number}"
-            )
+            self._nested = True
 
-            try:
-                await _translate_integrity_error(
-                    _native.execute_transaction(
-                        transaction=handle,
-                        sql=f"SAVEPOINT {self._savepoint_name}",
-                        params=None,
-                    )
+            if self._savepoint:
+                self._root._savepoint_number += 1
+                self._savepoint_name = (
+                    f"django_native_postgres_savepoint_{self._root._savepoint_number}"
                 )
-            except BaseException:
-                self._root._rollback_only = True
-                raise
+
+                try:
+                    await _translate_integrity_error(
+                        _native.execute_transaction(
+                            transaction=handle,
+                            sql=f"SAVEPOINT {self._savepoint_name}",
+                            params=None,
+                        )
+                    )
+                except BaseException:
+                    self._root._rollback_only = True
+                    raise
 
             self._handle = handle
 
@@ -147,7 +158,7 @@ class NativeTransaction:
                 )
             )
         except BaseException:
-            self._rollback_only = True
+            self._mark_for_rollback()
             raise
 
     async def execute_result(
@@ -171,7 +182,7 @@ class NativeTransaction:
                 )
             )
         except BaseException:
-            self._rollback_only = True
+            self._mark_for_rollback()
             raise
 
     async def execute_with_metadata(
@@ -195,7 +206,7 @@ class NativeTransaction:
                 )
             )
         except BaseException:
-            self._rollback_only = True
+            self._mark_for_rollback()
             raise
 
     async def __aexit__(
@@ -213,6 +224,13 @@ class NativeTransaction:
 
         self._validate_task()
 
+        if (
+            self._nested
+            and self._savepoint_name is None
+            and (exception_type is not None or self._rollback_only)
+        ):
+            self._root._rollback_only = True
+
         should_rollback = (
             exception_type is not None
             or self._rollback_only
@@ -224,7 +242,9 @@ class NativeTransaction:
         self._savepoint_name = None
 
         try:
-            if savepoint_name is None:
+            if self._nested and savepoint_name is None:
+                pass
+            elif savepoint_name is None:
                 if should_rollback:
                     await _native.rollback_transaction(handle)
                 else:
@@ -253,7 +273,7 @@ class NativeTransaction:
         finally:
             self._active_transaction.reset(token)
 
-            if savepoint_name is None:
+            if not self._nested:
                 self._owner_task = None
 
 
@@ -338,10 +358,13 @@ class NativeExecutor:
     def transaction(
         self,
         *,
+        savepoint: bool = True,
         isolation_level: TransactionIsolationLevel | None = None,
         read_only: bool | None = None,
         deferrable: bool | None = None,
     ) -> NativeTransaction:
+        if not isinstance(savepoint, bool):
+            raise TypeError("savepoint must be a bool")
         if isolation_level is not None and not isinstance(isolation_level, str):
             raise TypeError("isolation_level must be a string or None")
         if read_only is not None and not isinstance(read_only, bool):
@@ -352,6 +375,7 @@ class NativeExecutor:
         return NativeTransaction(
             self.pool,
             self._active_transaction,
+            savepoint=savepoint,
             isolation_level=isolation_level,
             read_only=read_only,
             deferrable=deferrable,

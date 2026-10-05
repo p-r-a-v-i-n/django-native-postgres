@@ -72,8 +72,20 @@ class DatabaseWrapper(PostgreSQLDatabaseWrapper):
     def acursor(self):
         return NativeAsyncCursor(self)
 
-    def atransaction(self):
-        return self.get_async_executor().transaction()
+    def atransaction(
+        self,
+        *,
+        savepoint=True,
+        isolation_level=None,
+        read_only=None,
+        deferrable=None,
+    ):
+        return self.get_async_executor().transaction(
+            savepoint=savepoint,
+            isolation_level=isolation_level,
+            read_only=read_only,
+            deferrable=deferrable,
+        )
 
     def get_async_autocommit(self):
         return not self.get_async_executor().in_transaction

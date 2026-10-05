@@ -4,7 +4,7 @@ from unittest import mock
 
 import pytest
 from django.core.exceptions import FieldDoesNotExist
-from django.db import IntegrityError, connections
+from django.db import IntegrityError, connections, transaction
 from django.db.models import Count, Prefetch, aprefetch_related_objects
 from django.db.models.deletion import ProtectedError, RestrictedError
 from django.db.models.signals import m2m_changed, post_delete, pre_delete, pre_save
@@ -157,6 +157,90 @@ async def test_django_connection_uses_active_native_transaction(transactional_db
     )
 
     assert rows == [["committed"]]
+
+
+@pytest.mark.asyncio
+async def test_django_async_atomic_commits_and_rolls_back(transactional_db):
+    async with transaction.atomic():
+        await Book.objects.acreate(name="committed")
+
+    with pytest.raises(ValueError, match="roll back"):
+        async with transaction.atomic():
+            await Book.objects.acreate(name="rolled back")
+            raise ValueError("roll back")
+
+    names = [
+        name
+        async for name in Book.objects.order_by("name").values_list("name", flat=True)
+    ]
+    assert names == ["committed"]
+
+
+@pytest.mark.asyncio
+async def test_django_async_atomic_uses_nested_savepoints(transactional_db):
+    async with transaction.atomic():
+        await Book.objects.acreate(name="before")
+
+        with pytest.raises(ValueError, match="roll back savepoint"):
+            async with transaction.atomic():
+                await Book.objects.acreate(name="inside savepoint")
+                raise ValueError("roll back savepoint")
+
+        await Book.objects.acreate(name="after")
+
+    names = {name async for name in Book.objects.values_list("name", flat=True)}
+    assert names == {"before", "after"}
+
+
+@pytest.mark.asyncio
+async def test_django_async_atomic_without_savepoint_marks_root_for_rollback(
+    transactional_db,
+):
+    async with transaction.atomic():
+        await Book.objects.acreate(name="before")
+
+        with pytest.raises(ValueError, match="roll back root"):
+            async with transaction.atomic(savepoint=False):
+                await Book.objects.acreate(name="inside")
+                raise ValueError("roll back root")
+
+        with pytest.raises(RuntimeError, match="marked for rollback"):
+            await Book.objects.acreate(name="after")
+
+    assert not await Book.objects.aexists()
+
+
+@pytest.mark.asyncio
+async def test_django_async_atomic_forwards_transaction_options(transactional_db):
+    async with transaction.atomic(
+        isolation_level="serializable",
+        read_only=True,
+        deferrable=True,
+    ):
+        rows = await connections["default"].aexecute(
+            "SELECT current_setting('transaction_isolation'), "
+            "current_setting('transaction_read_only'), "
+            "current_setting('transaction_deferrable')"
+        )
+
+    assert rows == [["serializable", "on", "on"]]
+
+
+@pytest.mark.asyncio
+async def test_django_async_atomic_supports_decorators_and_durable_blocks(
+    transactional_db,
+):
+    @transaction.atomic
+    async def create_book():
+        return await Book.objects.acreate(name="decorated")
+
+    book = await create_book()
+    assert await Book.objects.filter(pk=book.pk).aexists()
+
+    async with transaction.atomic():
+        with pytest.raises(RuntimeError, match="durable atomic block"):
+            async with transaction.atomic(durable=True):
+                pass
 
 
 @pytest.mark.asyncio

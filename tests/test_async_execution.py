@@ -60,6 +60,34 @@ def test_database_wrapper_opts_in_to_native_async_execution():
     assert isinstance(connection.acursor(), NativeAsyncCursor)
 
 
+def test_database_wrapper_forwards_async_transaction_options():
+    connection = connections["default"]
+    executor = mock.Mock()
+    context = object()
+    executor.transaction.return_value = context
+
+    with mock.patch.object(
+        connection,
+        "get_async_executor",
+        return_value=executor,
+        create=True,
+    ):
+        result = connection.atransaction(
+            savepoint=False,
+            isolation_level="serializable",
+            read_only=True,
+            deferrable=True,
+        )
+
+    assert result is context
+    executor.transaction.assert_called_once_with(
+        savepoint=False,
+        isolation_level="serializable",
+        read_only=True,
+        deferrable=True,
+    )
+
+
 def test_database_wrapper_rejects_zero_native_pool_max_size():
     setting_dict = {
         **connections["default"].settings_dict,
@@ -390,6 +418,7 @@ async def test_native_transaction_forwards_transaction_options():
 @pytest.mark.parametrize(
     ("options", "message"),
     [
+        ({"savepoint": 1}, "savepoint must be a bool"),
         ({"isolation_level": 1}, "isolation_level must be a string or None"),
         ({"read_only": "yes"}, "read_only must be a bool or None"),
         ({"deferrable": 1}, "deferrable must be a bool or None"),
@@ -702,6 +731,90 @@ async def test_executor_uses_savepoint_for_nested_transaction():
     ]
     commit_transaction.assert_awaited_once_with(handle)
     rollback_transaction.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_executor_can_skip_savepoint_for_nested_transaction():
+    pool = object()
+    handle = object()
+
+    with (
+        mock.patch(
+            "django_native_postgres.executor._native.create_pool",
+            return_value=pool,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.begin_transaction",
+            new=mock.AsyncMock(return_value=handle),
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.execute_transaction",
+            new=mock.AsyncMock(return_value=[]),
+        ) as execute_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.commit_transaction",
+            new=mock.AsyncMock(),
+        ) as commit_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.rollback_transaction",
+            new=mock.AsyncMock(),
+        ) as rollback_transaction,
+    ):
+        executor = NativeExecutor(database_url="postgresql://example")
+
+        async with executor.transaction():
+            async with executor.transaction(savepoint=False):
+                await executor.execute(sql="SELECT 1")
+
+    execute_transaction.assert_awaited_once_with(
+        transaction=handle,
+        sql="SELECT 1",
+        params=None,
+    )
+    commit_transaction.assert_awaited_once_with(handle)
+    rollback_transaction.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_nested_transaction_without_savepoint_marks_root_for_rollback():
+    pool = object()
+    handle = object()
+
+    with (
+        mock.patch(
+            "django_native_postgres.executor._native.create_pool",
+            return_value=pool,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.begin_transaction",
+            new=mock.AsyncMock(return_value=handle),
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.execute_transaction",
+            new=mock.AsyncMock(return_value=[]),
+        ) as execute_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.commit_transaction",
+            new=mock.AsyncMock(),
+        ) as commit_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.rollback_transaction",
+            new=mock.AsyncMock(),
+        ) as rollback_transaction,
+    ):
+        executor = NativeExecutor(database_url="postgresql://example")
+
+        async with executor.transaction():
+            with pytest.raises(ValueError, match="roll back the transaction"):
+                async with executor.transaction(savepoint=False):
+                    raise ValueError("roll back the transaction")
+
+            with pytest.raises(RuntimeError, match="marked for rollback"):
+                await executor.execute(sql="SELECT 1")
+
+    execute_transaction.assert_not_awaited()
+    commit_transaction.assert_not_awaited()
+    rollback_transaction.assert_awaited_once_with(handle)
 
 
 @pytest.mark.asyncio
