@@ -6,21 +6,27 @@ import pytest
 from django.db import IntegrityError, connections
 from django.db.models import Count
 from django.db.models.deletion import ProtectedError, RestrictedError
-from django.db.models.signals import post_delete, pre_delete, pre_save
+from django.db.models.signals import m2m_changed, post_delete, pre_delete, pre_save
 from django.db.transaction import TransactionManagementError
 from django_native_postgres import _native
 from psycopg.conninfo import make_conninfo
 
 from tests.integration_app.models import (
+    Article,
     Book,
     CallableSetChild,
     CascadeChild,
     CascadeGrandchild,
+    Club,
     DeletionParent,
+    Member,
+    Membership,
     NullableChild,
+    Person,
     ProtectedChild,
     ProtectedGrandchild,
     RestrictedChild,
+    Tag,
     UniqueRecord,
 )
 
@@ -632,3 +638,96 @@ async def test_django_reverse_foreign_key_async_manager_uses_native_backend(
     await first_parent.cascadechild_set.aadd(unsaved_child, bulk=False)
     assert unsaved_child.pk is not None
     assert unsaved_child.parent_id == first_parent.pk
+
+
+@pytest.mark.asyncio
+async def test_django_many_to_many_async_manager_preserves_signals(transactional_db):
+    article = await Article.objects.acreate(title="article")
+    first = await Tag.objects.acreate(name="first")
+    second = await Tag.objects.acreate(name="second")
+    third = await Tag.objects.acreate(name="third")
+    events = []
+
+    async def record_change(action, pk_set, **kwargs):
+        events.append((action, None if pk_set is None else frozenset(pk_set)))
+
+    through = Article.tags.through
+    m2m_changed.connect(record_change, sender=through)
+    try:
+        await article.tags.aadd(first, second)
+        await article.tags.aadd(first)
+        await article.tags.aremove(first)
+        await article.tags.aset(Tag.objects.filter(pk__in=[first.pk, third.pk]))
+        related_ids = {tag.pk async for tag in article.tags.order_by("pk")}
+        await article.tags.aclear()
+    finally:
+        m2m_changed.disconnect(record_change, sender=through)
+
+    assert related_ids == {first.pk, third.pk}
+    assert not await article.tags.aexists()
+    assert ("pre_add", frozenset({first.pk, second.pk})) in events
+    assert ("pre_add", frozenset()) in events
+    assert ("pre_remove", frozenset({first.pk})) in events
+    assert ("pre_clear", None) in events
+
+
+@pytest.mark.asyncio
+async def test_django_many_to_many_async_create_helpers_use_native_backend(
+    transactional_db,
+):
+    article = await Article.objects.acreate(title="first")
+    second_article = await Article.objects.acreate(title="second")
+
+    created_tag = await article.tags.acreate(name="created", value="one")
+    fetched_tag, created = await article.tags.aget_or_create(name="created")
+    assert fetched_tag == created_tag
+    assert created is False
+
+    updated_tag, created = await article.tags.aupdate_or_create(
+        name="created",
+        defaults={"value": "updated"},
+    )
+    assert created is False
+    assert updated_tag.value == "updated"
+
+    new_tag, created = await article.tags.aget_or_create(
+        name="new",
+        defaults={"value": "new"},
+    )
+    assert created is True
+    assert new_tag.value == "new"
+
+    await created_tag.articles.aadd(second_article)
+    article_ids = {item.pk async for item in created_tag.articles.order_by("pk")}
+    assert article_ids == {article.pk, second_article.pk}
+
+
+@pytest.mark.asyncio
+async def test_django_many_to_many_async_manager_supports_custom_through_model(
+    transactional_db,
+):
+    club = await Club.objects.acreate(name="club")
+    member = await Member.objects.acreate(name="member")
+
+    await club.members.aadd(
+        member,
+        through_defaults={"role": lambda: "admin"},
+    )
+    await club.members.aadd(member, through_defaults={"role": "ignored"})
+
+    membership = await Membership.objects.aget(club=club, member=member)
+    assert membership.role == "admin"
+
+    await club.members.aremove(member)
+    assert not await Membership.objects.filter(club=club, member=member).aexists()
+
+
+@pytest.mark.asyncio
+async def test_django_many_to_many_async_manager_preserves_symmetry(transactional_db):
+    first = await Person.objects.acreate(name="first")
+    second = await Person.objects.acreate(name="second")
+
+    await first.friends.aadd(second)
+
+    assert await first.friends.filter(pk=second.pk).aexists()
+    assert await second.friends.filter(pk=first.pk).aexists()
