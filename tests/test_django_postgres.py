@@ -585,3 +585,50 @@ async def test_django_async_select_for_update_requires_transaction(transactional
 
     with pytest.raises(TransactionManagementError):
         await UniqueRecord.objects.select_for_update().aget(key="record")
+
+
+@pytest.mark.asyncio
+async def test_django_reverse_foreign_key_async_manager_uses_native_backend(
+    transactional_db,
+):
+    first_parent = await DeletionParent.objects.acreate(name="first")
+    second_parent = await DeletionParent.objects.acreate(name="second")
+    child = await NullableChild.objects.acreate(parent=second_parent)
+
+    await first_parent.nullablechild_set.aadd(child)
+    assert (await NullableChild.objects.aget(pk=child.pk)).parent_id == first_parent.pk
+
+    await first_parent.nullablechild_set.aremove(child)
+    assert (await NullableChild.objects.aget(pk=child.pk)).parent_id is None
+
+    await first_parent.nullablechild_set.aadd(child, bulk=False)
+    await first_parent.nullablechild_set.aclear(bulk=False)
+    assert (await NullableChild.objects.aget(pk=child.pk)).parent_id is None
+
+    first_child = await NullableChild.objects.acreate(parent=first_parent)
+    second_child = await NullableChild.objects.acreate(parent=second_parent)
+    await first_parent.nullablechild_set.aset(
+        NullableChild.objects.filter(pk__in=[first_child.pk, second_child.pk])
+    )
+    related_ids = {
+        related.pk async for related in first_parent.nullablechild_set.order_by("pk")
+    }
+    assert related_ids == {first_child.pk, second_child.pk}
+
+    created_child = await first_parent.cascadechild_set.acreate()
+    fetched_child, created = await first_parent.cascadechild_set.aget_or_create(
+        pk=created_child.pk
+    )
+    assert fetched_child == created_child
+    assert created is False
+
+    new_child, created = await first_parent.cascadechild_set.aupdate_or_create(
+        pk=10_000
+    )
+    assert new_child.parent_id == first_parent.pk
+    assert created is True
+
+    unsaved_child = CascadeChild()
+    await first_parent.cascadechild_set.aadd(unsaved_child, bulk=False)
+    assert unsaved_child.pk is not None
+    assert unsaved_child.parent_id == first_parent.pk
