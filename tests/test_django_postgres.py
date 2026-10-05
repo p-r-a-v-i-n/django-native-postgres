@@ -493,3 +493,24 @@ async def test_django_adelete_empty_queryset(transactional_db):
     result = await DeletionParent.objects.filter(name="missing").adelete()
 
     assert result == (0, {})
+
+
+@pytest.mark.asyncio
+async def test_django_arefresh_from_db_executes_through_native_backend(django_book):
+    await Book.objects.filter(pk=django_book.pk).aupdate(name="Refreshed")
+    executor = connections["default"].get_async_executor()
+
+    with mock.patch.object(
+        executor,
+        "execute_result",
+        wraps=executor.execute_result,
+    ) as execute_result:
+        await django_book.arefresh_from_db(fields=["name"])
+
+    assert django_book.name == "Refreshed"
+    execute_result.assert_awaited_once()
+
+    with pytest.raises(Book.DoesNotExist):
+        await django_book.arefresh_from_db(
+            from_queryset=Book.objects.filter(name="missing")
+        )
