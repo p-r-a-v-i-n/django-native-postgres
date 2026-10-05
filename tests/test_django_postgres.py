@@ -4,7 +4,7 @@ from unittest import mock
 
 import pytest
 from django.db import IntegrityError, connections
-from django.db.models import Count
+from django.db.models import Count, Prefetch, aprefetch_related_objects
 from django.db.models.deletion import ProtectedError, RestrictedError
 from django.db.models.signals import m2m_changed, post_delete, pre_delete, pre_save
 from django.db.transaction import TransactionManagementError
@@ -731,3 +731,109 @@ async def test_django_many_to_many_async_manager_preserves_symmetry(transactiona
 
     assert await first.friends.filter(pk=second.pk).aexists()
     assert await second.friends.filter(pk=first.pk).aexists()
+
+
+@pytest.mark.asyncio
+async def test_django_async_prefetch_uses_native_backend(transactional_db):
+    first_article = await Article.objects.acreate(title="first")
+    second_article = await Article.objects.acreate(title="second")
+    first_tag = await Tag.objects.acreate(name="first")
+    second_tag = await Tag.objects.acreate(name="second")
+    await first_article.tags.aadd(first_tag, second_tag)
+    await second_article.tags.aadd(second_tag)
+    executor = connections["default"].get_async_executor()
+
+    with mock.patch.object(
+        executor,
+        "execute_result",
+        wraps=executor.execute_result,
+    ) as execute_result:
+        articles = [
+            article
+            async for article in Article.objects.order_by("title").prefetch_related(
+                "tags"
+            )
+        ]
+        tag_names = [
+            sorted([tag.name async for tag in article.tags.all()])
+            for article in articles
+        ]
+
+    assert tag_names == [["first", "second"], ["second"]]
+    assert execute_result.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_django_async_prefetch_supports_nested_and_custom_lookups(
+    transactional_db,
+):
+    first_article = await Article.objects.acreate(title="first")
+    second_article = await Article.objects.acreate(title="second")
+    first_tag = await Tag.objects.acreate(name="first")
+    second_tag = await Tag.objects.acreate(name="second")
+    await first_article.tags.aadd(first_tag, second_tag)
+    await second_article.tags.aadd(second_tag)
+
+    articles = [
+        article
+        async for article in Article.objects.order_by("title").prefetch_related(
+            "tags__articles",
+            Prefetch(
+                "tags",
+                queryset=Tag.objects.filter(name="first"),
+                to_attr="first_tags",
+            ),
+        )
+    ]
+
+    assert [tag.name for tag in articles[0].first_tags] == ["first"]
+    assert articles[1].first_tags == []
+    tags = [tag async for tag in articles[0].tags.all()]
+    second_tag = next(tag for tag in tags if tag.name == "second")
+    second_tag_articles = sorted(
+        [article.title async for article in second_tag.articles.all()]
+    )
+    assert second_tag_articles == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_django_async_prefetch_preserves_reverse_foreign_key_cache(
+    transactional_db,
+):
+    parent = await DeletionParent.objects.acreate(name="parent")
+    await CascadeChild.objects.acreate(parent=parent)
+    executor = connections["default"].get_async_executor()
+
+    with mock.patch.object(
+        executor,
+        "execute_result",
+        wraps=executor.execute_result,
+    ) as execute_result:
+        fetched_parent = await DeletionParent.objects.prefetch_related(
+            "cascadechild_set"
+        ).aget(pk=parent.pk)
+        children = [child async for child in fetched_parent.cascadechild_set.all()]
+        child_parent = children[0].parent
+
+    assert child_parent is fetched_parent
+    assert execute_result.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_django_aprefetch_related_objects_uses_native_backend(transactional_db):
+    article = await Article.objects.acreate(title="article")
+    tag = await Tag.objects.acreate(name="tag")
+    await article.tags.aadd(tag)
+    articles = [item async for item in Article.objects.all()]
+    executor = connections["default"].get_async_executor()
+
+    with mock.patch.object(
+        executor,
+        "execute_result",
+        wraps=executor.execute_result,
+    ) as execute_result:
+        await aprefetch_related_objects(articles, "tags")
+        tags = [item async for item in articles[0].tags.all()]
+
+    assert tags == [tag]
+    execute_result.assert_awaited_once()
