@@ -249,6 +249,93 @@ async def test_django_async_atomic_supports_decorators_and_durable_blocks(
 
 
 @pytest.mark.asyncio
+async def test_django_async_atomic_runs_on_commit_callbacks(transactional_db):
+    callbacks = []
+
+    async with transaction.atomic():
+        transaction.on_commit(lambda: callbacks.append("outer"))
+        assert callbacks == []
+
+        async with transaction.atomic():
+            transaction.on_commit(lambda: callbacks.append("inner"))
+
+        transaction.on_commit(lambda: callbacks.append("after-inner"))
+        assert callbacks == []
+
+    assert callbacks == ["outer", "inner", "after-inner"]
+
+
+@pytest.mark.asyncio
+async def test_django_async_atomic_discards_rolled_back_callbacks(transactional_db):
+    callbacks = []
+
+    async with transaction.atomic():
+        transaction.on_commit(lambda: callbacks.append("outer"))
+        try:
+            async with transaction.atomic():
+                transaction.on_commit(lambda: callbacks.append("inner"))
+                raise ValueError("roll back savepoint")
+        except ValueError:
+            pass
+
+    assert callbacks == ["outer"]
+
+    try:
+        async with transaction.atomic():
+            transaction.on_commit(lambda: callbacks.append("rolled-back-root"))
+            raise ValueError("roll back transaction")
+    except ValueError:
+        pass
+
+    assert callbacks == ["outer"]
+
+
+@pytest.mark.asyncio
+async def test_django_async_atomic_supports_rollback_state(transactional_db):
+    with pytest.raises(TransactionManagementError, match="outside of an 'atomic'"):
+        transaction.get_rollback()
+    with pytest.raises(TransactionManagementError, match="outside of an 'atomic'"):
+        transaction.set_rollback(True)
+
+    async with transaction.atomic():
+        await Book.objects.acreate(name="rolled back")
+        assert transaction.get_rollback() is False
+        transaction.set_rollback(True)
+        assert transaction.get_rollback() is True
+
+    assert not await Book.objects.filter(name="rolled back").aexists()
+
+    async with transaction.atomic():
+        await Book.objects.acreate(name="committed")
+        transaction.set_rollback(True)
+        transaction.set_rollback(False)
+
+    assert await Book.objects.filter(name="committed").aexists()
+
+
+@pytest.mark.asyncio
+async def test_django_async_atomic_robust_on_commit_callbacks(
+    transactional_db,
+    caplog,
+):
+    callbacks = []
+
+    def failing_callback():
+        raise ValueError("callback failed")
+
+    def registering_callback():
+        callbacks.append("first")
+        transaction.on_commit(lambda: callbacks.append("second"))
+
+    async with transaction.atomic():
+        transaction.on_commit(failing_callback, robust=True)
+        transaction.on_commit(registering_callback)
+
+    assert callbacks == ["first", "second"]
+    assert "callback failed" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_django_exists_query_executes_through_native_executor(
     compiled_book_exists_query,
 ):

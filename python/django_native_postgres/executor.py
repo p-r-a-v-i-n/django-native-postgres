@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import logging
 from asyncio import Task, current_task
-from collections.abc import Awaitable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from contextvars import ContextVar, Token
 from types import TracebackType
 from typing import Literal
 
 from django.db import IntegrityError
+from django.db.transaction import TransactionManagementError
 
 from django_native_postgres import _native
+
+logger = logging.getLogger("django.db.backends.base")
 
 type TransactionIsolationLevel = Literal[
     "read_uncommitted",
@@ -30,6 +34,9 @@ class NativeTransaction:
         self,
         pool: _native.PoolHandle,
         active_transaction: ContextVar[NativeTransaction | None],
+        pending_on_commit_callbacks: ContextVar[
+            tuple[tuple[Callable[[], object], bool], ...]
+        ],
         *,
         savepoint: bool = True,
         isolation_level: TransactionIsolationLevel | None = None,
@@ -38,16 +45,19 @@ class NativeTransaction:
     ):
         self._pool = pool
         self._active_transaction = active_transaction
+        self._pending_on_commit_callbacks = pending_on_commit_callbacks
         self._handle: _native.TransactionHandle | None = None
         self._token: Token | None = None
         self._used = False
         self._root: NativeTransaction = self
+        self._parent: NativeTransaction | None = None
         self._nested = False
         self._savepoint = savepoint
         self._savepoint_name: str | None = None
         self._savepoint_number = 0
         self._owner_task: Task[object] | None = None
         self._rollback_only = False
+        self._on_commit_callbacks: list[tuple[Callable[[], object], bool]] = []
         self._isolation_level = isolation_level
         self._read_only = read_only
         self._deferrable = deferrable
@@ -56,6 +66,29 @@ class NativeTransaction:
         self._rollback_only = True
         if self._nested and not self._savepoint:
             self._root._rollback_only = True
+
+    @property
+    def needs_rollback(self) -> bool:
+        return self._rollback_only or self._root._rollback_only
+
+    def set_rollback(self, rollback: bool) -> None:
+        self._validate_task()
+        if rollback:
+            self._mark_for_rollback()
+            return
+        self._rollback_only = False
+        if not self._nested or not self._savepoint:
+            self._root._rollback_only = False
+
+    def on_commit(
+        self,
+        func: Callable[[], object],
+        robust: bool = False,
+    ) -> None:
+        self._validate_task()
+        if not callable(func):
+            raise TypeError("on_commit()'s callback must be a callable.")
+        self._on_commit_callbacks.append((func, robust))
 
     def _validate_task(self) -> None:
         if self._root._owner_task is not current_task():
@@ -112,6 +145,7 @@ class NativeTransaction:
                 )
 
             self._root = active_transaction._root
+            self._parent = active_transaction
             self._nested = True
 
             if self._savepoint:
@@ -240,15 +274,17 @@ class NativeTransaction:
         self._handle = None
         self._token = None
         self._savepoint_name = None
+        committed = False
 
         try:
             if self._nested and savepoint_name is None:
-                pass
+                committed = not should_rollback
             elif savepoint_name is None:
                 if should_rollback:
                     await _native.rollback_transaction(handle)
                 else:
                     await _translate_integrity_error(_native.commit_transaction(handle))
+                    committed = True
             else:
                 try:
                     if should_rollback:
@@ -267,6 +303,7 @@ class NativeTransaction:
                             params=None,
                         )
                     )
+                    committed = not should_rollback
                 except BaseException:
                     self._root._rollback_only = True
                     raise
@@ -275,6 +312,14 @@ class NativeTransaction:
 
             if not self._nested:
                 self._owner_task = None
+
+        if committed:
+            if self._parent is None:
+                self._pending_on_commit_callbacks.set(tuple(self._on_commit_callbacks))
+                self._on_commit_callbacks = []
+            else:
+                self._parent._on_commit_callbacks.extend(self._on_commit_callbacks)
+                self._on_commit_callbacks = []
 
 
 class NativeExecutor:
@@ -293,10 +338,74 @@ class NativeExecutor:
             "django_native_postgres_active_transaction",
             default=None,
         )
+        self._pending_on_commit_callbacks: ContextVar[
+            tuple[tuple[Callable[[], object], bool], ...]
+        ] = ContextVar(
+            "django_native_postgres_pending_on_commit_callbacks",
+            default=(),
+        )
 
     @property
     def in_transaction(self) -> bool:
         return self._active_transaction.get() is not None
+
+    @property
+    def needs_rollback(self) -> bool:
+        transaction = self._active_transaction.get()
+        if transaction is None:
+            raise TransactionManagementError(
+                "The rollback flag doesn't work outside of an 'atomic' block."
+            )
+        return transaction.needs_rollback
+
+    def set_rollback(self, rollback: bool) -> None:
+        transaction = self._active_transaction.get()
+        if transaction is None:
+            raise TransactionManagementError(
+                "The rollback flag doesn't work outside of an 'atomic' block."
+            )
+        transaction.set_rollback(rollback)
+
+    def on_commit(
+        self,
+        func: Callable[[], object],
+        robust: bool = False,
+    ) -> None:
+        transaction = self._active_transaction.get()
+        if transaction is None:
+            if not callable(func):
+                raise TypeError("on_commit()'s callback must be a callable.")
+            if robust:
+                try:
+                    func()
+                except Exception as error:
+                    name = getattr(func, "__qualname__", func)
+                    logger.exception(
+                        "Error calling %s in on_commit() (%s).",
+                        name,
+                        error,
+                    )
+            else:
+                func()
+            return
+        transaction.on_commit(func, robust)
+
+    def run_on_commit_callbacks(self) -> None:
+        callbacks = self._pending_on_commit_callbacks.get()
+        self._pending_on_commit_callbacks.set(())
+        for func, robust in callbacks:
+            if robust:
+                try:
+                    func()
+                except Exception as error:
+                    name = getattr(func, "__qualname__", func)
+                    logger.exception(
+                        "Error calling %s in on_commit() during transaction (%s).",
+                        name,
+                        error,
+                    )
+            else:
+                func()
 
     async def execute(
         self,
@@ -375,6 +484,7 @@ class NativeExecutor:
         return NativeTransaction(
             self.pool,
             self._active_transaction,
+            self._pending_on_commit_callbacks,
             savepoint=savepoint,
             isolation_level=isolation_level,
             read_only=read_only,

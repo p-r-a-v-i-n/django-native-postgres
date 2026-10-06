@@ -90,6 +90,18 @@ class DatabaseWrapper(PostgreSQLDatabaseWrapper):
     def get_async_autocommit(self):
         return not self.get_async_executor().in_transaction
 
+    def get_async_rollback(self):
+        return self.get_async_executor().needs_rollback
+
+    def set_async_rollback(self, rollback):
+        self.get_async_executor().set_rollback(rollback)
+
+    def on_async_commit(self, func, robust=False):
+        self.get_async_executor().on_commit(func, robust)
+
+    def run_async_commit_hooks(self):
+        self.get_async_executor().run_on_commit_callbacks()
+
     def get_connection_params(self):
         connection_params = super().get_connection_params()
         connection_params.pop("native_pool", None)
