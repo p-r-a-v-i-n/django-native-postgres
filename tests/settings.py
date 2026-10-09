@@ -2,7 +2,10 @@ import os
 
 SECRET_KEY = "django-native-postgres-tests"
 
-INSTALLED_APPS = ["tests.integration_app"]
+INSTALLED_APPS = [
+    "django.contrib.contenttypes",
+    "tests.integration_app",
+]
 
 DATABASES = {
     "default": {

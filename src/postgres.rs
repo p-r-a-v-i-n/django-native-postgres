@@ -1,7 +1,7 @@
 use crate::error::NativeError;
-use crate::parameter::QueryParameter;
-use crate::placeholders::rewrite_django_placeholders;
+use crate::parameter::QueryParameters;
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod};
+use futures_util::TryStreamExt;
 use pyo3::prelude::*;
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -19,6 +19,13 @@ pub(crate) enum QueryValue {
 }
 
 pub(crate) type QueryRows = Vec<Vec<Option<QueryValue>>>;
+pub(crate) type QueryColumns = Vec<String>;
+
+pub(crate) struct QueryResult {
+    pub(crate) rows: QueryRows,
+    pub(crate) rows_affected: u64,
+    pub(crate) columns: QueryColumns,
+}
 
 fn query_error_allows_connection_reuse(error: &tokio_postgres::Error) -> bool {
     error
@@ -53,20 +60,24 @@ pub(crate) async fn execute_on_client<C>(
     client: &C,
     cancel_token: CancelToken,
     sql: &str,
-    params: &[QueryParameter],
+    params: QueryParameters,
     cancellation: &mut oneshot::Receiver<()>,
-) -> Result<QueryRows, NativeError>
+) -> Result<QueryResult, NativeError>
 where
     C: GenericClient + Sync,
 {
+    let (postgres_sql, params) = params.prepare(sql)?;
     let postgres_params: Vec<(&(dyn ToSql + Sync), Type)> = params
         .iter()
         .map(|parameter| (parameter.as_postgres(), parameter.postgres_type()))
         .collect();
 
-    let postgres_sql = rewrite_django_placeholders(sql, params.len())?;
-
-    let query = client.query_typed(postgres_sql.as_str(), &postgres_params);
+    let query = client.query_typed_raw(
+        postgres_sql.as_str(),
+        postgres_params
+            .iter()
+            .map(|(value, postgres_type)| (*value, postgres_type.clone())),
+    );
     tokio::pin!(query);
 
     let rows = tokio::select! {
@@ -83,7 +94,16 @@ where
             // PostgreSQL sends the cancellation result through the original
             // connection. Drain it before that connection can be reused.
             let connection_can_be_reused = match query.await {
-                Ok(_) => true,
+                Ok(rows) => {
+                    tokio::pin!(rows);
+                    loop {
+                        match rows.try_next().await {
+                            Ok(Some(_)) => continue,
+                            Ok(None) => break true,
+                            Err(error) => break query_error_allows_connection_reuse(&error),
+                        }
+                    }
+                }
                 Err(error) => query_error_allows_connection_reuse(&error),
             };
             return Err(NativeError::QueryCancelled {
@@ -92,9 +112,54 @@ where
         }
     };
 
-    let mut decoded_rows = Vec::with_capacity(rows.len());
+    tokio::pin!(rows);
+    let mut postgres_rows = Vec::new();
 
-    for row in rows {
+    loop {
+        let row = tokio::select! {
+            biased;
+            result = rows.try_next() => {
+                result.map_err(NativeError::PostgresQuery)?
+            }
+            _ = &mut *cancellation => {
+                cancel_token
+                    .cancel_query(NoTls)
+                    .await
+                    .map_err(NativeError::PostgresCancel)?;
+
+                let connection_can_be_reused = loop {
+                    match rows.try_next().await {
+                        Ok(Some(_)) => continue,
+                        Ok(None) => break true,
+                        Err(error) => break query_error_allows_connection_reuse(&error),
+                    }
+                };
+                return Err(NativeError::QueryCancelled {
+                    connection_can_be_reused,
+                });
+            }
+        };
+
+        match row {
+            Some(row) => postgres_rows.push(row),
+            None => break,
+        }
+    }
+
+    let rows_affected = rows.rows_affected().unwrap_or(0);
+    let columns = postgres_rows
+        .first()
+        .map(|row| {
+            row.columns()
+                .iter()
+                .map(|column| column.name().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut decoded_rows = Vec::with_capacity(postgres_rows.len());
+
+    for row in postgres_rows {
         let mut decoded_row = Vec::with_capacity(row.len());
 
         for column in 0..row.len() {
@@ -133,15 +198,19 @@ where
         decoded_rows.push(decoded_row);
     }
 
-    Ok(decoded_rows)
+    Ok(QueryResult {
+        rows: decoded_rows,
+        rows_affected,
+        columns,
+    })
 }
 
 pub(crate) async fn execute(
     pool: &Pool,
     sql: &str,
-    params: &[QueryParameter],
+    params: QueryParameters,
     cancellation: &mut oneshot::Receiver<()>,
-) -> Result<QueryRows, NativeError> {
+) -> Result<QueryResult, NativeError> {
     let client = tokio::select! {
         result = pool.get() => {
             result.map_err(|error| NativeError::PostgresPoolAcquire(error.to_string()))?

@@ -4,6 +4,8 @@ use crate::error::NativeError;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
+pyo3::create_exception!(_native, PostgresIntegrityError, PyRuntimeError);
+
 mod cancellation;
 mod error;
 mod parameter;
@@ -65,10 +67,35 @@ async fn begin_transaction(
 async fn execute_transaction(
     transaction: Py<transaction::TransactionHandle>,
     sql: String,
-    params: Option<Vec<parameter::QueryParameter>>,
+    params: Option<parameter::QueryParameters>,
 ) -> PyResult<postgres::QueryRows> {
     transaction::execute(transaction.get().clone(), sql, params.unwrap_or_default())
         .await
+        .map(|result| result.rows)
+        .map_err(to_python_error)
+}
+
+#[pyfunction(signature = (transaction, sql, params=None))]
+async fn execute_transaction_result(
+    transaction: Py<transaction::TransactionHandle>,
+    sql: String,
+    params: Option<parameter::QueryParameters>,
+) -> PyResult<(postgres::QueryRows, u64)> {
+    transaction::execute(transaction.get().clone(), sql, params.unwrap_or_default())
+        .await
+        .map(|result| (result.rows, result.rows_affected))
+        .map_err(to_python_error)
+}
+
+#[pyfunction(signature = (transaction, sql, params=None))]
+async fn execute_transaction_with_metadata(
+    transaction: Py<transaction::TransactionHandle>,
+    sql: String,
+    params: Option<parameter::QueryParameters>,
+) -> PyResult<(postgres::QueryRows, u64, postgres::QueryColumns)> {
+    transaction::execute(transaction.get().clone(), sql, params.unwrap_or_default())
+        .await
+        .map(|result| (result.rows, result.rows_affected, result.columns))
         .map_err(to_python_error)
 }
 
@@ -90,10 +117,35 @@ async fn rollback_transaction(transaction: Py<transaction::TransactionHandle>) -
 async fn execute(
     pool: Py<pool::PoolHandle>,
     sql: String,
-    params: Option<Vec<parameter::QueryParameter>>,
+    params: Option<parameter::QueryParameters>,
 ) -> PyResult<postgres::QueryRows> {
     runtime::execute(pool.get().clone(), sql, params.unwrap_or_default())
         .await
+        .map(|result| result.rows)
+        .map_err(to_python_error)
+}
+
+#[pyfunction(signature = (pool, sql, params=None))]
+async fn execute_result(
+    pool: Py<pool::PoolHandle>,
+    sql: String,
+    params: Option<parameter::QueryParameters>,
+) -> PyResult<(postgres::QueryRows, u64)> {
+    runtime::execute(pool.get().clone(), sql, params.unwrap_or_default())
+        .await
+        .map(|result| (result.rows, result.rows_affected))
+        .map_err(to_python_error)
+}
+
+#[pyfunction(signature = (pool, sql, params=None))]
+async fn execute_with_metadata(
+    pool: Py<pool::PoolHandle>,
+    sql: String,
+    params: Option<parameter::QueryParameters>,
+) -> PyResult<(postgres::QueryRows, u64, postgres::QueryColumns)> {
+    runtime::execute(pool.get().clone(), sql, params.unwrap_or_default())
+        .await
+        .map(|result| (result.rows, result.rows_affected, result.columns))
         .map_err(to_python_error)
 }
 
@@ -104,23 +156,41 @@ async fn close_pools() -> PyResult<()> {
 
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add(
+        "PostgresIntegrityError",
+        module.py().get_type::<PostgresIntegrityError>(),
+    )?;
     module.add_class::<pool::PoolHandle>()?;
     module.add_class::<transaction::TransactionHandle>()?;
 
     module.add_function(wrap_pyfunction!(build_info, module)?)?;
     module.add_function(wrap_pyfunction!(runtime_probe, module)?)?;
     module.add_function(wrap_pyfunction!(execute, module)?)?;
+    module.add_function(wrap_pyfunction!(execute_result, module)?)?;
+    module.add_function(wrap_pyfunction!(execute_with_metadata, module)?)?;
     module.add_function(wrap_pyfunction!(close_pools, module)?)?;
     module.add_function(wrap_pyfunction!(create_pool, module)?)?;
     module.add_function(wrap_pyfunction!(close_pool, module)?)?;
     module.add_function(wrap_pyfunction!(begin_transaction, module)?)?;
     module.add_function(wrap_pyfunction!(execute_transaction, module)?)?;
+    module.add_function(wrap_pyfunction!(execute_transaction_result, module)?)?;
+    module.add_function(wrap_pyfunction!(execute_transaction_with_metadata, module)?)?;
     module.add_function(wrap_pyfunction!(commit_transaction, module)?)?;
     module.add_function(wrap_pyfunction!(rollback_transaction, module)?)?;
     Ok(())
 }
 
 fn to_python_error(error: NativeError) -> PyErr {
+    if matches!(
+        &error,
+        NativeError::PostgresQuery(source)
+            | NativeError::PostgresTransaction { source, .. }
+            if source
+                .code()
+                .is_some_and(|code| code.code().starts_with("23"))
+    ) {
+        return PostgresIntegrityError::new_err(error.to_string());
+    }
     match error {
         error @ NativeError::InvalidTransactionIsolationLevel(_) => {
             PyValueError::new_err(error.to_string())

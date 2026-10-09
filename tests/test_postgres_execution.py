@@ -3,6 +3,7 @@ import multiprocessing
 import os
 
 import pytest
+from django.db import IntegrityError
 from django_native_postgres import _native
 from django_native_postgres.executor import NativeExecutor
 
@@ -94,6 +95,89 @@ async def test_execute_returns_text_rows_from_postgres(postgres_pool):
     )
 
     assert rows == [["django-native-postgres"]]
+
+
+@pytest.mark.asyncio
+async def test_execute_result_returns_rows_and_affected_count(postgres_pool):
+    rows, rows_affected = await _native.execute_result(
+        pool=postgres_pool,
+        sql="SELECT value FROM (VALUES (1), (2)) AS example(value)",
+    )
+
+    assert rows == [[1], [2]]
+    assert rows_affected == 2
+
+
+@pytest.mark.asyncio
+async def test_execute_with_metadata_returns_column_names(postgres_pool):
+    rows, rows_affected, columns = await _native.execute_with_metadata(
+        pool=postgres_pool,
+        sql="SELECT 1::BIGINT AS first_value, 'two'::TEXT AS second_value",
+    )
+
+    assert rows == [[1, "two"]]
+    assert rows_affected == 1
+    assert columns == ["first_value", "second_value"]
+
+
+@pytest.mark.asyncio
+async def test_transaction_execute_with_metadata_returns_column_names(postgres_pool):
+    transaction = await _native.begin_transaction(postgres_pool)
+
+    try:
+        rows, rows_affected, columns = await _native.execute_transaction_with_metadata(
+            transaction=transaction,
+            sql="SELECT 1::BIGINT AS value",
+        )
+    finally:
+        await _native.rollback_transaction(transaction)
+
+    assert rows == [[1]]
+    assert rows_affected == 1
+    assert columns == ["value"]
+
+
+@pytest.mark.asyncio
+async def test_transaction_execute_accepts_named_parameters(postgres_pool):
+    transaction = await _native.begin_transaction(postgres_pool)
+
+    try:
+        rows = await _native.execute_transaction(
+            transaction=transaction,
+            sql="SELECT %(value)s::TEXT, %(value)s::TEXT",
+            params={"value": "Django"},
+        )
+    finally:
+        await _native.rollback_transaction(transaction)
+
+    assert rows == [["Django", "Django"]]
+
+
+@pytest.mark.asyncio
+async def test_transaction_execute_result_returns_write_count(postgres_pool):
+    transaction = await _native.begin_transaction(postgres_pool)
+
+    await _native.execute_transaction(
+        transaction=transaction,
+        sql="CREATE TEMPORARY TABLE native_result_count (value BIGINT)",
+    )
+    rows, rows_affected = await _native.execute_transaction_result(
+        transaction=transaction,
+        sql="INSERT INTO native_result_count VALUES (1), (2) RETURNING value",
+    )
+
+    assert rows == [[1], [2]]
+    assert rows_affected == 2
+
+    rows, rows_affected = await _native.execute_transaction_result(
+        transaction=transaction,
+        sql="UPDATE native_result_count SET value = value + 1",
+    )
+
+    assert rows == []
+    assert rows_affected == 2
+
+    await _native.rollback_transaction(transaction)
 
 
 @pytest.mark.asyncio
@@ -333,7 +417,7 @@ async def test_savepoint_recovers_after_postgres_error(postgres_database_url):
                 params=(1,),
             )
 
-            with pytest.raises(RuntimeError, match="PostgreSQL query failed"):
+            with pytest.raises(IntegrityError, match="PostgreSQL query failed"):
                 async with executor.transaction():
                     await executor.execute(
                         sql="INSERT INTO savepoint_error VALUES (%s)",
@@ -374,7 +458,7 @@ async def test_savepoint_recovers_when_postgres_error_is_caught_inside_context(
             )
 
             async with executor.transaction():
-                with pytest.raises(RuntimeError, match="PostgreSQL query failed"):
+                with pytest.raises(IntegrityError, match="PostgreSQL query failed"):
                     await executor.execute(
                         sql="INSERT INTO caught_savepoint_error VALUES (%s)",
                         params=(1,),
@@ -715,6 +799,34 @@ async def test_execute_accepts_multiple_django_text_parameters(
 
 
 @pytest.mark.asyncio
+async def test_execute_accepts_named_parameters_in_sql_order(postgres_pool):
+    rows = await _native.execute(
+        pool=postgres_pool,
+        sql=("SELECT 5 %% 2, %(second)s::TEXT, %(first)s::TEXT, %(second)s::TEXT"),
+        params={
+            "first": "Django",
+            "second": "Rust",
+            "unused": "ignored",
+        },
+    )
+
+    assert rows == [[1, "Rust", "Django", "Rust"]]
+
+
+@pytest.mark.asyncio
+async def test_execute_rejects_missing_named_parameter(postgres_pool):
+    with pytest.raises(
+        RuntimeError,
+        match='SQL placeholder "missing" has no matching parameter',
+    ):
+        await _native.execute(
+            pool=postgres_pool,
+            sql="SELECT %(missing)s::TEXT",
+            params={"unused": "Django"},
+        )
+
+
+@pytest.mark.asyncio
 async def test_execute_rejects_parameter_count_mismatch(
     postgres_pool,
 ):
@@ -750,6 +862,41 @@ async def test_execute_assigns_type_to_untyped_integer_parameter(
     )
 
     assert rows == [[42]]
+
+
+@pytest.mark.asyncio
+async def test_execute_accepts_null_parameters(postgres_pool):
+    rows = await _native.execute(
+        pool=postgres_pool,
+        sql="SELECT %s::BIGINT, %s::TEXT",
+        params=(None, None),
+    )
+
+    assert rows == [[None, None]]
+
+
+@pytest.mark.asyncio
+async def test_execute_exposes_postgres_integrity_errors(postgres_pool):
+    transaction = await _native.begin_transaction(postgres_pool)
+    try:
+        await _native.execute_transaction(
+            transaction,
+            "CREATE TEMPORARY TABLE native_unique (value BIGINT UNIQUE)",
+        )
+        await _native.execute_transaction(
+            transaction,
+            "INSERT INTO native_unique VALUES (%s)",
+            (1,),
+        )
+
+        with pytest.raises(_native.PostgresIntegrityError):
+            await _native.execute_transaction(
+                transaction,
+                "INSERT INTO native_unique VALUES (%s)",
+                (1,),
+            )
+    finally:
+        await _native.rollback_transaction(transaction)
 
 
 @pytest.mark.asyncio

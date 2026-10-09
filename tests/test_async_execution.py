@@ -5,6 +5,7 @@ import pytest
 from django.core.exceptions import ImproperlyConfigured
 from django.db import connections
 from django_native_postgres.base import DatabaseWrapper
+from django_native_postgres.cursor import NativeAsyncCursor
 from django_native_postgres.executor import NativeExecutor
 from psycopg.conninfo import conninfo_to_dict
 
@@ -50,6 +51,41 @@ def test_database_wrapper_builds_and_caches_native_executor():
         "host": "database.example.com",
         "port": "5432",
     }
+
+
+def test_database_wrapper_opts_in_to_native_async_execution():
+    connection = connections["default"]
+
+    assert connection.features.supports_async is True
+    assert isinstance(connection.acursor(), NativeAsyncCursor)
+
+
+def test_database_wrapper_forwards_async_transaction_options():
+    connection = connections["default"]
+    executor = mock.Mock()
+    context = object()
+    executor.transaction.return_value = context
+
+    with mock.patch.object(
+        connection,
+        "get_async_executor",
+        return_value=executor,
+        create=True,
+    ):
+        result = connection.atransaction(
+            savepoint=False,
+            isolation_level="serializable",
+            read_only=True,
+            deferrable=True,
+        )
+
+    assert result is context
+    executor.transaction.assert_called_once_with(
+        savepoint=False,
+        isolation_level="serializable",
+        read_only=True,
+        deferrable=True,
+    )
 
 
 def test_database_wrapper_rejects_zero_native_pool_max_size():
@@ -108,6 +144,122 @@ async def test_aexecute_forwards_query_to_process_executor():
     assert result is executor.execute.return_value
     executor.execute.assert_awaited_once_with(sql=sql, params=params)
     assert connection.connection is None
+
+
+@pytest.mark.asyncio
+async def test_aexecute_result_forwards_query_to_process_executor():
+    connection = connections["default"]
+    executor = mock.Mock()
+    executor.execute_result = mock.AsyncMock(return_value=([], 2))
+    sql = "UPDATE example SET active = %s"
+    params = (True,)
+
+    with mock.patch.object(
+        connection,
+        "get_async_executor",
+        return_value=executor,
+        create=True,
+    ):
+        result = await connection.aexecute_result(sql, params)
+
+    assert result == ([], 2)
+    executor.execute_result.assert_awaited_once_with(sql=sql, params=params)
+    assert connection.connection is None
+
+
+@pytest.mark.asyncio
+async def test_aexecute_with_metadata_forwards_query_to_process_executor():
+    connection = connections["default"]
+    executor = mock.Mock()
+    executor.execute_with_metadata = mock.AsyncMock(return_value=([[1]], 1, ["value"]))
+
+    with mock.patch.object(
+        connection,
+        "get_async_executor",
+        return_value=executor,
+        create=True,
+    ):
+        result = await connection.aexecute_with_metadata("SELECT %s", (1,))
+
+    assert result == ([[1]], 1, ["value"])
+    executor.execute_with_metadata.assert_awaited_once_with(
+        sql="SELECT %s", params=(1,)
+    )
+    assert connection.connection is None
+
+
+@pytest.mark.asyncio
+async def test_async_cursor_executes_and_fetches_rows():
+    connection = mock.Mock()
+    connection.aexecute_with_metadata = mock.AsyncMock(
+        return_value=([[1], [2]], 2, ["value"])
+    )
+    cursor = NativeAsyncCursor(connection)
+
+    async with cursor as opened_cursor:
+        result = await opened_cursor.aexecute("SELECT %s", (1,))
+
+        assert result is None
+        assert opened_cursor.rowcount == 2
+        assert opened_cursor.description == [
+            ("value", None, None, None, None, None, None)
+        ]
+        assert await opened_cursor.afetchone() == [1]
+        assert await opened_cursor.afetchone() == [2]
+        assert await opened_cursor.afetchone() is None
+
+    connection.aexecute_with_metadata.assert_awaited_once_with("SELECT %s", (1,))
+
+
+@pytest.mark.asyncio
+async def test_async_cursor_fetches_remaining_rows():
+    connection = mock.Mock()
+    connection.aexecute_with_metadata = mock.AsyncMock(
+        return_value=([[1], [2], [3]], 3, ["value"])
+    )
+
+    async with NativeAsyncCursor(connection) as cursor:
+        await cursor.aexecute("SELECT value FROM example")
+
+        assert await cursor.afetchone() == [1]
+        assert await cursor.afetchall() == [[2], [3]]
+        assert await cursor.afetchall() == []
+
+
+@pytest.mark.asyncio
+async def test_async_cursor_fetches_rows_in_chunks():
+    connection = mock.Mock()
+    connection.aexecute_with_metadata = mock.AsyncMock(
+        return_value=([[1], [2], [3]], 3, ["value"])
+    )
+
+    async with NativeAsyncCursor(connection) as cursor:
+        await cursor.aexecute("SELECT value FROM example")
+
+        assert await cursor.afetchmany(2) == [[1], [2]]
+        assert await cursor.afetchmany(2) == [[3]]
+        assert await cursor.afetchmany(2) == []
+
+
+@pytest.mark.asyncio
+async def test_async_cursor_cannot_fetch_without_an_active_result():
+    cursor = NativeAsyncCursor(mock.Mock())
+    message = "No active query result on this cursor"
+
+    with pytest.raises(RuntimeError, match=message):
+        await cursor.afetchone()
+
+    with pytest.raises(RuntimeError, match=message):
+        await cursor.afetchmany(1)
+
+    with pytest.raises(RuntimeError, match=message):
+        await cursor.afetchall()
+
+    async with cursor:
+        pass
+
+    with pytest.raises(RuntimeError, match=message):
+        await cursor.afetchone()
 
 
 @pytest.mark.asyncio
@@ -266,6 +418,7 @@ async def test_native_transaction_forwards_transaction_options():
 @pytest.mark.parametrize(
     ("options", "message"),
     [
+        ({"savepoint": 1}, "savepoint must be a bool"),
         ({"isolation_level": 1}, "isolation_level must be a string or None"),
         ({"read_only": "yes"}, "read_only must be a bool or None"),
         ({"deferrable": 1}, "deferrable must be a bool or None"),
@@ -405,6 +558,60 @@ async def test_executor_routes_queries_through_active_transaction():
 
 
 @pytest.mark.asyncio
+async def test_executor_routes_metadata_queries_through_active_transaction():
+    pool = object()
+    handle = object()
+    transaction_result = ([["transaction"]], 1, ["source"])
+    pool_result = ([["pool"]], 1, ["source"])
+
+    with (
+        mock.patch(
+            "django_native_postgres.executor._native.create_pool",
+            return_value=pool,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.begin_transaction",
+            new=mock.AsyncMock(return_value=handle),
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.execute_transaction_with_metadata",
+            new=mock.AsyncMock(return_value=transaction_result),
+        ) as execute_transaction_with_metadata,
+        mock.patch(
+            "django_native_postgres.executor._native.execute_with_metadata",
+            new=mock.AsyncMock(return_value=pool_result),
+        ) as execute_with_metadata,
+        mock.patch(
+            "django_native_postgres.executor._native.commit_transaction",
+            new=mock.AsyncMock(),
+        ),
+    ):
+        executor = NativeExecutor(database_url="postgresql://example")
+
+        async with executor.transaction():
+            active_result = await executor.execute_with_metadata(
+                sql="SELECT 'transaction' AS source"
+            )
+
+        inactive_result = await executor.execute_with_metadata(
+            sql="SELECT 'pool' AS source"
+        )
+
+    assert active_result is transaction_result
+    assert inactive_result is pool_result
+    execute_transaction_with_metadata.assert_awaited_once_with(
+        transaction=handle,
+        sql="SELECT 'transaction' AS source",
+        params=None,
+    )
+    execute_with_metadata.assert_awaited_once_with(
+        pool=pool,
+        sql="SELECT 'pool' AS source",
+        params=None,
+    )
+
+
+@pytest.mark.asyncio
 async def test_executor_keeps_transaction_isolated_between_tasks():
     pool = object()
     handle = object()
@@ -524,6 +731,90 @@ async def test_executor_uses_savepoint_for_nested_transaction():
     ]
     commit_transaction.assert_awaited_once_with(handle)
     rollback_transaction.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_executor_can_skip_savepoint_for_nested_transaction():
+    pool = object()
+    handle = object()
+
+    with (
+        mock.patch(
+            "django_native_postgres.executor._native.create_pool",
+            return_value=pool,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.begin_transaction",
+            new=mock.AsyncMock(return_value=handle),
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.execute_transaction",
+            new=mock.AsyncMock(return_value=[]),
+        ) as execute_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.commit_transaction",
+            new=mock.AsyncMock(),
+        ) as commit_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.rollback_transaction",
+            new=mock.AsyncMock(),
+        ) as rollback_transaction,
+    ):
+        executor = NativeExecutor(database_url="postgresql://example")
+
+        async with executor.transaction():
+            async with executor.transaction(savepoint=False):
+                await executor.execute(sql="SELECT 1")
+
+    execute_transaction.assert_awaited_once_with(
+        transaction=handle,
+        sql="SELECT 1",
+        params=None,
+    )
+    commit_transaction.assert_awaited_once_with(handle)
+    rollback_transaction.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_nested_transaction_without_savepoint_marks_root_for_rollback():
+    pool = object()
+    handle = object()
+
+    with (
+        mock.patch(
+            "django_native_postgres.executor._native.create_pool",
+            return_value=pool,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.begin_transaction",
+            new=mock.AsyncMock(return_value=handle),
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.execute_transaction",
+            new=mock.AsyncMock(return_value=[]),
+        ) as execute_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.commit_transaction",
+            new=mock.AsyncMock(),
+        ) as commit_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.rollback_transaction",
+            new=mock.AsyncMock(),
+        ) as rollback_transaction,
+    ):
+        executor = NativeExecutor(database_url="postgresql://example")
+
+        async with executor.transaction():
+            with pytest.raises(ValueError, match="roll back the transaction"):
+                async with executor.transaction(savepoint=False):
+                    raise ValueError("roll back the transaction")
+
+            with pytest.raises(RuntimeError, match="marked for rollback"):
+                await executor.execute(sql="SELECT 1")
+
+    execute_transaction.assert_not_awaited()
+    commit_transaction.assert_not_awaited()
+    rollback_transaction.assert_awaited_once_with(handle)
 
 
 @pytest.mark.asyncio

@@ -4,11 +4,16 @@ from django.db.backends.postgresql.base import (
 )
 from psycopg.conninfo import make_conninfo
 
+from django_native_postgres.cursor import NativeAsyncCursor
 from django_native_postgres.executor import NativeExecutor
+from django_native_postgres.features import DatabaseFeatures
+from django_native_postgres.operations import DatabaseOperations
 
 
 class DatabaseWrapper(PostgreSQLDatabaseWrapper):
     display_name = "PostgreSQL (native async)"
+    features_class = DatabaseFeatures
+    ops_class = DatabaseOperations
 
     def get_async_executor(self):
         executor = getattr(self, "_native_executor", None)
@@ -55,6 +60,47 @@ class DatabaseWrapper(PostgreSQLDatabaseWrapper):
     async def aexecute(self, sql, params=None):
         executor = self.get_async_executor()
         return await executor.execute(sql=sql, params=params)
+
+    async def aexecute_result(self, sql, params=None):
+        executor = self.get_async_executor()
+        return await executor.execute_result(sql=sql, params=params)
+
+    async def aexecute_with_metadata(self, sql, params=None):
+        executor = self.get_async_executor()
+        return await executor.execute_with_metadata(sql=sql, params=params)
+
+    def acursor(self):
+        return NativeAsyncCursor(self)
+
+    def atransaction(
+        self,
+        *,
+        savepoint=True,
+        isolation_level=None,
+        read_only=None,
+        deferrable=None,
+    ):
+        return self.get_async_executor().transaction(
+            savepoint=savepoint,
+            isolation_level=isolation_level,
+            read_only=read_only,
+            deferrable=deferrable,
+        )
+
+    def get_async_autocommit(self):
+        return not self.get_async_executor().in_transaction
+
+    def get_async_rollback(self):
+        return self.get_async_executor().needs_rollback
+
+    def set_async_rollback(self, rollback):
+        self.get_async_executor().set_rollback(rollback)
+
+    def on_async_commit(self, func, robust=False):
+        self.get_async_executor().on_commit(func, robust)
+
+    def run_async_commit_hooks(self):
+        self.get_async_executor().run_on_commit_callbacks()
 
     def get_connection_params(self):
         connection_params = super().get_connection_params()

@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import logging
 from asyncio import Task, current_task
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextvars import ContextVar, Token
 from types import TracebackType
 from typing import Literal
 
+from django.db import IntegrityError
+from django.db.transaction import TransactionManagementError
+
 from django_native_postgres import _native
+
+logger = logging.getLogger("django.db.backends.base")
 
 type TransactionIsolationLevel = Literal[
     "read_uncommitted",
@@ -14,6 +20,15 @@ type TransactionIsolationLevel = Literal[
     "repeatable_read",
     "serializable",
 ]
+type QueryParameter = str | int | None
+type QueryParameters = Sequence[QueryParameter] | Mapping[str, QueryParameter]
+
+
+async def _translate_integrity_error[T](operation: Awaitable[T]) -> T:
+    try:
+        return await operation
+    except _native.PostgresIntegrityError as error:
+        raise IntegrityError(str(error)) from error
 
 
 class NativeTransaction:
@@ -21,24 +36,61 @@ class NativeTransaction:
         self,
         pool: _native.PoolHandle,
         active_transaction: ContextVar[NativeTransaction | None],
+        pending_on_commit_callbacks: ContextVar[
+            tuple[tuple[Callable[[], object], bool], ...]
+        ],
         *,
+        savepoint: bool = True,
         isolation_level: TransactionIsolationLevel | None = None,
         read_only: bool | None = None,
         deferrable: bool | None = None,
     ):
         self._pool = pool
         self._active_transaction = active_transaction
+        self._pending_on_commit_callbacks = pending_on_commit_callbacks
         self._handle: _native.TransactionHandle | None = None
         self._token: Token | None = None
         self._used = False
         self._root: NativeTransaction = self
+        self._parent: NativeTransaction | None = None
+        self._nested = False
+        self._savepoint = savepoint
         self._savepoint_name: str | None = None
         self._savepoint_number = 0
         self._owner_task: Task[object] | None = None
         self._rollback_only = False
+        self._on_commit_callbacks: list[tuple[Callable[[], object], bool]] = []
         self._isolation_level = isolation_level
         self._read_only = read_only
         self._deferrable = deferrable
+
+    def _mark_for_rollback(self) -> None:
+        self._rollback_only = True
+        if self._nested and not self._savepoint:
+            self._root._rollback_only = True
+
+    @property
+    def needs_rollback(self) -> bool:
+        return self._rollback_only or self._root._rollback_only
+
+    def set_rollback(self, rollback: bool) -> None:
+        self._validate_task()
+        if rollback:
+            self._mark_for_rollback()
+            return
+        self._rollback_only = False
+        if not self._nested or not self._savepoint:
+            self._root._rollback_only = False
+
+    def on_commit(
+        self,
+        func: Callable[[], object],
+        robust: bool = False,
+    ) -> None:
+        self._validate_task()
+        if not callable(func):
+            raise TypeError("on_commit()'s callback must be a callable.")
+        self._on_commit_callbacks.append((func, robust))
 
     def _validate_task(self) -> None:
         if self._root._owner_task is not current_task():
@@ -65,11 +117,13 @@ class NativeTransaction:
         active_transaction = self._active_transaction.get()
 
         if active_transaction is None:
-            self._handle = await _native.begin_transaction(
-                self._pool,
-                isolation_level=self._isolation_level,
-                read_only=self._read_only,
-                deferrable=self._deferrable,
+            self._handle = await _translate_integrity_error(
+                _native.begin_transaction(
+                    self._pool,
+                    isolation_level=self._isolation_level,
+                    read_only=self._read_only,
+                    deferrable=self._deferrable,
+                )
             )
             self._owner_task = owner_task
         else:
@@ -93,20 +147,26 @@ class NativeTransaction:
                 )
 
             self._root = active_transaction._root
-            self._root._savepoint_number += 1
-            self._savepoint_name = (
-                f"django_native_postgres_savepoint_{self._root._savepoint_number}"
-            )
+            self._parent = active_transaction
+            self._nested = True
 
-            try:
-                await _native.execute_transaction(
-                    transaction=handle,
-                    sql=f"SAVEPOINT {self._savepoint_name}",
-                    params=None,
+            if self._savepoint:
+                self._root._savepoint_number += 1
+                self._savepoint_name = (
+                    f"django_native_postgres_savepoint_{self._root._savepoint_number}"
                 )
-            except BaseException:
-                self._root._rollback_only = True
-                raise
+
+                try:
+                    await _translate_integrity_error(
+                        _native.execute_transaction(
+                            transaction=handle,
+                            sql=f"SAVEPOINT {self._savepoint_name}",
+                            params=None,
+                        )
+                    )
+                except BaseException:
+                    self._root._rollback_only = True
+                    raise
 
             self._handle = handle
 
@@ -116,7 +176,7 @@ class NativeTransaction:
     async def execute(
         self,
         sql: str,
-        params: Sequence[str | int] | None = None,
+        params: QueryParameters | None = None,
     ) -> list[list[str | int | None]]:
         handle = self._handle
 
@@ -126,13 +186,63 @@ class NativeTransaction:
         self._validate_usable()
 
         try:
-            return await _native.execute_transaction(
-                transaction=handle,
-                sql=sql,
-                params=params,
+            return await _translate_integrity_error(
+                _native.execute_transaction(
+                    transaction=handle,
+                    sql=sql,
+                    params=params,
+                )
             )
         except BaseException:
-            self._rollback_only = True
+            self._mark_for_rollback()
+            raise
+
+    async def execute_result(
+        self,
+        sql: str,
+        params: QueryParameters | None = None,
+    ) -> tuple[list[list[str | int | None]], int]:
+        handle = self._handle
+
+        if handle is None:
+            raise RuntimeError("Native transaction is not active")
+
+        self._validate_usable()
+
+        try:
+            return await _translate_integrity_error(
+                _native.execute_transaction_result(
+                    transaction=handle,
+                    sql=sql,
+                    params=params,
+                )
+            )
+        except BaseException:
+            self._mark_for_rollback()
+            raise
+
+    async def execute_with_metadata(
+        self,
+        sql: str,
+        params: QueryParameters | None = None,
+    ) -> tuple[list[list[str | int | None]], int, list[str]]:
+        handle = self._handle
+
+        if handle is None:
+            raise RuntimeError("Native transaction is not active")
+
+        self._validate_usable()
+
+        try:
+            return await _translate_integrity_error(
+                _native.execute_transaction_with_metadata(
+                    transaction=handle,
+                    sql=sql,
+                    params=params,
+                )
+            )
+        except BaseException:
+            self._mark_for_rollback()
             raise
 
     async def __aexit__(
@@ -150,6 +260,13 @@ class NativeTransaction:
 
         self._validate_task()
 
+        if (
+            self._nested
+            and self._savepoint_name is None
+            and (exception_type is not None or self._rollback_only)
+        ):
+            self._root._rollback_only = True
+
         should_rollback = (
             exception_type is not None
             or self._rollback_only
@@ -159,35 +276,52 @@ class NativeTransaction:
         self._handle = None
         self._token = None
         self._savepoint_name = None
+        committed = False
 
         try:
-            if savepoint_name is None:
+            if self._nested and savepoint_name is None:
+                committed = not should_rollback
+            elif savepoint_name is None:
                 if should_rollback:
                     await _native.rollback_transaction(handle)
                 else:
-                    await _native.commit_transaction(handle)
+                    await _translate_integrity_error(_native.commit_transaction(handle))
+                    committed = True
             else:
                 try:
                     if should_rollback:
-                        await _native.execute_transaction(
-                            transaction=handle,
-                            sql=f"ROLLBACK TO SAVEPOINT {savepoint_name}",
-                            params=None,
+                        await _translate_integrity_error(
+                            _native.execute_transaction(
+                                transaction=handle,
+                                sql=f"ROLLBACK TO SAVEPOINT {savepoint_name}",
+                                params=None,
+                            )
                         )
 
-                    await _native.execute_transaction(
-                        transaction=handle,
-                        sql=f"RELEASE SAVEPOINT {savepoint_name}",
-                        params=None,
+                    await _translate_integrity_error(
+                        _native.execute_transaction(
+                            transaction=handle,
+                            sql=f"RELEASE SAVEPOINT {savepoint_name}",
+                            params=None,
+                        )
                     )
+                    committed = not should_rollback
                 except BaseException:
                     self._root._rollback_only = True
                     raise
         finally:
             self._active_transaction.reset(token)
 
-            if savepoint_name is None:
+            if not self._nested:
                 self._owner_task = None
+
+        if committed:
+            if self._parent is None:
+                self._pending_on_commit_callbacks.set(tuple(self._on_commit_callbacks))
+                self._on_commit_callbacks = []
+            else:
+                self._parent._on_commit_callbacks.extend(self._on_commit_callbacks)
+                self._on_commit_callbacks = []
 
 
 class NativeExecutor:
@@ -206,21 +340,127 @@ class NativeExecutor:
             "django_native_postgres_active_transaction",
             default=None,
         )
+        self._pending_on_commit_callbacks: ContextVar[
+            tuple[tuple[Callable[[], object], bool], ...]
+        ] = ContextVar(
+            "django_native_postgres_pending_on_commit_callbacks",
+            default=(),
+        )
+
+    @property
+    def in_transaction(self) -> bool:
+        return self._active_transaction.get() is not None
+
+    @property
+    def needs_rollback(self) -> bool:
+        transaction = self._active_transaction.get()
+        if transaction is None:
+            raise TransactionManagementError(
+                "The rollback flag doesn't work outside of an 'atomic' block."
+            )
+        return transaction.needs_rollback
+
+    def set_rollback(self, rollback: bool) -> None:
+        transaction = self._active_transaction.get()
+        if transaction is None:
+            raise TransactionManagementError(
+                "The rollback flag doesn't work outside of an 'atomic' block."
+            )
+        transaction.set_rollback(rollback)
+
+    def on_commit(
+        self,
+        func: Callable[[], object],
+        robust: bool = False,
+    ) -> None:
+        transaction = self._active_transaction.get()
+        if transaction is None:
+            if not callable(func):
+                raise TypeError("on_commit()'s callback must be a callable.")
+            if robust:
+                try:
+                    func()
+                except Exception as error:
+                    name = getattr(func, "__qualname__", func)
+                    logger.exception(
+                        "Error calling %s in on_commit() (%s).",
+                        name,
+                        error,
+                    )
+            else:
+                func()
+            return
+        transaction.on_commit(func, robust)
+
+    def run_on_commit_callbacks(self) -> None:
+        callbacks = self._pending_on_commit_callbacks.get()
+        self._pending_on_commit_callbacks.set(())
+        for func, robust in callbacks:
+            if robust:
+                try:
+                    func()
+                except Exception as error:
+                    name = getattr(func, "__qualname__", func)
+                    logger.exception(
+                        "Error calling %s in on_commit() during transaction (%s).",
+                        name,
+                        error,
+                    )
+            else:
+                func()
 
     async def execute(
         self,
         sql: str,
-        params: Sequence[str | int] | None = None,
+        params: QueryParameters | None = None,
     ) -> list[list[str | int | None]]:
         transaction = self._active_transaction.get()
 
         if transaction is not None:
             return await transaction.execute(sql=sql, params=params)
 
-        return await _native.execute(
-            pool=self.pool,
-            sql=sql,
-            params=params,
+        return await _translate_integrity_error(
+            _native.execute(
+                pool=self.pool,
+                sql=sql,
+                params=params,
+            )
+        )
+
+    async def execute_result(
+        self,
+        sql: str,
+        params: QueryParameters | None = None,
+    ) -> tuple[list[list[str | int | None]], int]:
+        transaction = self._active_transaction.get()
+
+        if transaction is not None:
+            return await transaction.execute_result(sql=sql, params=params)
+
+        return await _translate_integrity_error(
+            _native.execute_result(
+                pool=self.pool,
+                sql=sql,
+                params=params,
+            )
+        )
+
+    async def execute_with_metadata(
+        self,
+        sql: str,
+        params: QueryParameters | None = None,
+    ) -> tuple[list[list[str | int | None]], int, list[str]]:
+        transaction = self._active_transaction.get()
+
+        if transaction is not None:
+            return await transaction.execute_with_metadata(sql=sql, params=params)
+
+        return await _translate_integrity_error(
+            _native.execute_with_metadata(
+                pool=self.pool,
+                sql=sql,
+                params=params,
+            )
         )
 
     async def close(self) -> None:
@@ -229,10 +469,13 @@ class NativeExecutor:
     def transaction(
         self,
         *,
+        savepoint: bool = True,
         isolation_level: TransactionIsolationLevel | None = None,
         read_only: bool | None = None,
         deferrable: bool | None = None,
     ) -> NativeTransaction:
+        if not isinstance(savepoint, bool):
+            raise TypeError("savepoint must be a bool")
         if isolation_level is not None and not isinstance(isolation_level, str):
             raise TypeError("isolation_level must be a string or None")
         if read_only is not None and not isinstance(read_only, bool):
@@ -243,6 +486,8 @@ class NativeExecutor:
         return NativeTransaction(
             self.pool,
             self._active_transaction,
+            self._pending_on_commit_callbacks,
+            savepoint=savepoint,
             isolation_level=isolation_level,
             read_only=read_only,
             deferrable=deferrable,
