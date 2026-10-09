@@ -7,7 +7,16 @@ from contextvars import ContextVar, Token
 from types import TracebackType
 from typing import Literal
 
-from django.db import IntegrityError
+from django.db import (
+    DatabaseError,
+    DataError,
+    IntegrityError,
+    InterfaceError,
+    InternalError,
+    NotSupportedError,
+    OperationalError,
+    ProgrammingError,
+)
 from django.db.transaction import TransactionManagementError
 
 from django_native_postgres import _native
@@ -24,11 +33,63 @@ type QueryParameter = str | int | None
 type QueryParameters = Sequence[QueryParameter] | Mapping[str, QueryParameter]
 
 
-async def _translate_integrity_error[T](operation: Awaitable[T]) -> T:
+_SQLSTATE_EXCEPTION_CLASSES: dict[str, type[DatabaseError]] = {
+    "08": OperationalError,
+    "0A": NotSupportedError,
+    "10": ProgrammingError,
+    "20": ProgrammingError,
+    "21": ProgrammingError,
+    "22": DataError,
+    "23": IntegrityError,
+    "24": InternalError,
+    "25": InternalError,
+    "26": ProgrammingError,
+    "27": OperationalError,
+    "28": OperationalError,
+    "2B": InternalError,
+    "2D": InternalError,
+    "2F": OperationalError,
+    "34": ProgrammingError,
+    "38": OperationalError,
+    "39": OperationalError,
+    "3B": OperationalError,
+    "3D": ProgrammingError,
+    "3F": ProgrammingError,
+    "40": OperationalError,
+    "42": ProgrammingError,
+    "44": ProgrammingError,
+    "53": OperationalError,
+    "54": OperationalError,
+    "55": OperationalError,
+    "57": OperationalError,
+    "58": OperationalError,
+    "F0": OperationalError,
+    "HV": OperationalError,
+    "P0": ProgrammingError,
+    "XX": InternalError,
+}
+
+
+def _django_database_error_class(sqlstate: str) -> type[DatabaseError]:
+    return _SQLSTATE_EXCEPTION_CLASSES.get(sqlstate[:2], DatabaseError)
+
+
+async def _translate_database_error[T](operation: Awaitable[T]) -> T:
     try:
         return await operation
-    except _native.PostgresIntegrityError as error:
-        raise IntegrityError(str(error)) from error
+    except _native.PostgresDatabaseError as error:
+        error_class = _django_database_error_class(error.sqlstate)
+        raise error_class(str(error)) from error
+    except _native.PostgresDataError as error:
+        raise DataError(str(error)) from error
+    except _native.PostgresInterfaceError as error:
+        raise InterfaceError(str(error)) from error
+    except _native.PostgresNotSupportedError as error:
+        raise NotSupportedError(str(error)) from error
+    except _native.PostgresOperationalError as error:
+        raise OperationalError(str(error)) from error
+    except _native.PostgresProgrammingError as error:
+        raise ProgrammingError(str(error)) from error
 
 
 class NativeTransaction:
@@ -117,7 +178,7 @@ class NativeTransaction:
         active_transaction = self._active_transaction.get()
 
         if active_transaction is None:
-            self._handle = await _translate_integrity_error(
+            self._handle = await _translate_database_error(
                 _native.begin_transaction(
                     self._pool,
                     isolation_level=self._isolation_level,
@@ -157,7 +218,7 @@ class NativeTransaction:
                 )
 
                 try:
-                    await _translate_integrity_error(
+                    await _translate_database_error(
                         _native.execute_transaction(
                             transaction=handle,
                             sql=f"SAVEPOINT {self._savepoint_name}",
@@ -186,7 +247,7 @@ class NativeTransaction:
         self._validate_usable()
 
         try:
-            return await _translate_integrity_error(
+            return await _translate_database_error(
                 _native.execute_transaction(
                     transaction=handle,
                     sql=sql,
@@ -210,7 +271,7 @@ class NativeTransaction:
         self._validate_usable()
 
         try:
-            return await _translate_integrity_error(
+            return await _translate_database_error(
                 _native.execute_transaction_result(
                     transaction=handle,
                     sql=sql,
@@ -234,7 +295,7 @@ class NativeTransaction:
         self._validate_usable()
 
         try:
-            return await _translate_integrity_error(
+            return await _translate_database_error(
                 _native.execute_transaction_with_metadata(
                     transaction=handle,
                     sql=sql,
@@ -283,14 +344,16 @@ class NativeTransaction:
                 committed = not should_rollback
             elif savepoint_name is None:
                 if should_rollback:
-                    await _native.rollback_transaction(handle)
+                    await _translate_database_error(
+                        _native.rollback_transaction(handle)
+                    )
                 else:
-                    await _translate_integrity_error(_native.commit_transaction(handle))
+                    await _translate_database_error(_native.commit_transaction(handle))
                     committed = True
             else:
                 try:
                     if should_rollback:
-                        await _translate_integrity_error(
+                        await _translate_database_error(
                             _native.execute_transaction(
                                 transaction=handle,
                                 sql=f"ROLLBACK TO SAVEPOINT {savepoint_name}",
@@ -298,7 +361,7 @@ class NativeTransaction:
                             )
                         )
 
-                    await _translate_integrity_error(
+                    await _translate_database_error(
                         _native.execute_transaction(
                             transaction=handle,
                             sql=f"RELEASE SAVEPOINT {savepoint_name}",
@@ -419,7 +482,7 @@ class NativeExecutor:
         if transaction is not None:
             return await transaction.execute(sql=sql, params=params)
 
-        return await _translate_integrity_error(
+        return await _translate_database_error(
             _native.execute(
                 pool=self.pool,
                 sql=sql,
@@ -437,7 +500,7 @@ class NativeExecutor:
         if transaction is not None:
             return await transaction.execute_result(sql=sql, params=params)
 
-        return await _translate_integrity_error(
+        return await _translate_database_error(
             _native.execute_result(
                 pool=self.pool,
                 sql=sql,
@@ -455,7 +518,7 @@ class NativeExecutor:
         if transaction is not None:
             return await transaction.execute_with_metadata(sql=sql, params=params)
 
-        return await _translate_integrity_error(
+        return await _translate_database_error(
             _native.execute_with_metadata(
                 pool=self.pool,
                 sql=sql,
@@ -464,7 +527,7 @@ class NativeExecutor:
         )
 
     async def close(self) -> None:
-        await _native.close_pool(self.pool)
+        await _translate_database_error(_native.close_pool(self.pool))
 
     def transaction(
         self,

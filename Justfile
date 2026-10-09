@@ -90,5 +90,5 @@ db-down:
         echo "Stopped $DNP_POSTGRES_CONTAINER"
     fi
 
-test-postgres: db-up
-    @DJANGO_NATIVE_POSTGRES_TEST_DATABASE_URL="$DNP_TEST_DATABASE_URL" uv run --no-sync pytest -q tests/test_postgres_execution.py tests/test_django_postgres.py
+test-postgres *args: db-up
+    @DJANGO_NATIVE_POSTGRES_TEST_DATABASE_URL="$DNP_TEST_DATABASE_URL" uv run --no-sync pytest -q {{ if args == "" { "tests/test_postgres_execution.py tests/test_django_postgres.py" } else { args } }}
