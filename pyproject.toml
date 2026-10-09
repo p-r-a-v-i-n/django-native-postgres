@@ -49,4 +49,4 @@ target-version = "py312"
 select = ["E", "F", "I", "UP"]
 
 [tool.uv.sources]
-django = { git = "https://github.com/p-r-a-v-i-n/django.git", branch = "feature/async-query-has-results" }
+django = { git = "https://github.com/p-r-a-v-i-n/django.git", branch = "feature/native-async-backend-contract" }
