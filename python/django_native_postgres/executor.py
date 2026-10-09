@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from asyncio import Task, current_task
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextvars import ContextVar, Token
 from types import TracebackType
 from typing import Literal
@@ -20,6 +20,8 @@ type TransactionIsolationLevel = Literal[
     "repeatable_read",
     "serializable",
 ]
+type QueryParameter = str | int | None
+type QueryParameters = Sequence[QueryParameter] | Mapping[str, QueryParameter]
 
 
 async def _translate_integrity_error[T](operation: Awaitable[T]) -> T:
@@ -174,7 +176,7 @@ class NativeTransaction:
     async def execute(
         self,
         sql: str,
-        params: Sequence[str | int | None] | None = None,
+        params: QueryParameters | None = None,
     ) -> list[list[str | int | None]]:
         handle = self._handle
 
@@ -198,7 +200,7 @@ class NativeTransaction:
     async def execute_result(
         self,
         sql: str,
-        params: Sequence[str | int | None] | None = None,
+        params: QueryParameters | None = None,
     ) -> tuple[list[list[str | int | None]], int]:
         handle = self._handle
 
@@ -222,7 +224,7 @@ class NativeTransaction:
     async def execute_with_metadata(
         self,
         sql: str,
-        params: Sequence[str | int | None] | None = None,
+        params: QueryParameters | None = None,
     ) -> tuple[list[list[str | int | None]], int, list[str]]:
         handle = self._handle
 
@@ -410,7 +412,7 @@ class NativeExecutor:
     async def execute(
         self,
         sql: str,
-        params: Sequence[str | int | None] | None = None,
+        params: QueryParameters | None = None,
     ) -> list[list[str | int | None]]:
         transaction = self._active_transaction.get()
 
@@ -428,7 +430,7 @@ class NativeExecutor:
     async def execute_result(
         self,
         sql: str,
-        params: Sequence[str | int | None] | None = None,
+        params: QueryParameters | None = None,
     ) -> tuple[list[list[str | int | None]], int]:
         transaction = self._active_transaction.get()
 
@@ -446,7 +448,7 @@ class NativeExecutor:
     async def execute_with_metadata(
         self,
         sql: str,
-        params: Sequence[str | int | None] | None = None,
+        params: QueryParameters | None = None,
     ) -> tuple[list[list[str | int | None]], int, list[str]]:
         transaction = self._active_transaction.get()
 

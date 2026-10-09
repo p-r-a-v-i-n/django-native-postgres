@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from types import TracebackType
 from typing import Protocol
 
 type QueryParameter = str | int | None
+type QueryParameters = Sequence[QueryParameter] | Mapping[str, QueryParameter]
 type QueryRow = list[str | int | None]
 type CursorDescription = tuple[str, None, None, None, None, None, None]
 
@@ -13,7 +14,7 @@ class AsyncConnection(Protocol):
     async def aexecute_with_metadata(
         self,
         sql: str,
-        params: Sequence[QueryParameter] | None = None,
+        params: QueryParameters | None = None,
     ) -> tuple[list[QueryRow], int, list[str]]: ...
 
 
@@ -46,7 +47,7 @@ class NativeAsyncCursor:
     async def aexecute(
         self,
         sql: str,
-        params: Sequence[QueryParameter] | None = None,
+        params: QueryParameters | None = None,
     ) -> None:
         self._rows = None
         self._position = 0

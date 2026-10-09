@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct PlaceholderCountMismatch {
     pub(crate) placeholders: usize,
@@ -37,14 +39,13 @@ fn dollar_quote_delimiter(input: &str) -> Option<&str> {
     }
 }
 
-pub(crate) fn rewrite_django_placeholders(
+fn rewrite_placeholders(
     sql: &str,
-    parameter_count: usize,
-) -> Result<String, PlaceholderCountMismatch> {
+    mut replacement: impl FnMut(&str) -> Option<(usize, String)>,
+) -> String {
     let mut output = String::with_capacity(sql.len());
     let mut characters = sql.char_indices().peekable();
     let mut state = SqlState::Normal;
-    let mut placeholder_count = 0;
 
     while let Some((index, character)) = characters.next() {
         state = match state {
@@ -89,13 +90,27 @@ pub(crate) fn rewrite_django_placeholders(
                         SqlState::Normal
                     }
                 }
-                '%' if characters.peek().is_some_and(|(_, next)| *next == 's') => {
+                '%' if characters.peek().is_some_and(|(_, next)| *next == '%') => {
+                    output.push('%');
                     characters.next();
-                    placeholder_count += 1;
-                    output.push('$');
-                    output.push_str(&placeholder_count.to_string());
                     SqlState::Normal
                 }
+                '%' => match replacement(&sql[index..]) {
+                    Some((length, value)) => {
+                        output.push_str(&value);
+
+                        // The first character was already consumed.
+                        for _ in 1..length {
+                            characters.next();
+                        }
+
+                        SqlState::Normal
+                    }
+                    None => {
+                        output.push(character);
+                        SqlState::Normal
+                    }
+                },
                 _ => {
                     output.push(character);
                     SqlState::Normal
@@ -201,6 +216,23 @@ pub(crate) fn rewrite_django_placeholders(
         };
     }
 
+    output
+}
+
+pub(crate) fn rewrite_django_placeholders(
+    sql: &str,
+    parameter_count: usize,
+) -> Result<String, PlaceholderCountMismatch> {
+    let mut placeholder_count = 0;
+    let output = rewrite_placeholders(sql, |input| {
+        if input.starts_with("%s") {
+            placeholder_count += 1;
+            Some((2, format!("${placeholder_count}")))
+        } else {
+            None
+        }
+    });
+
     if placeholder_count != parameter_count {
         return Err(PlaceholderCountMismatch {
             placeholders: placeholder_count,
@@ -209,6 +241,34 @@ pub(crate) fn rewrite_django_placeholders(
     }
 
     Ok(output)
+}
+
+pub(crate) fn rewrite_django_named_placeholders(sql: &str) -> (String, Vec<String>) {
+    let mut parameter_indexes = HashMap::new();
+    let mut parameter_names = Vec::new();
+    let output = rewrite_placeholders(sql, |input| {
+        let remainder = input.strip_prefix("%(")?;
+        let closing_parenthesis = remainder.find(')')?;
+        let name = &remainder[..closing_parenthesis];
+
+        if name.is_empty() || !remainder[closing_parenthesis..].starts_with(")s") {
+            return None;
+        }
+
+        let index = match parameter_indexes.get(name) {
+            Some(index) => *index,
+            None => {
+                let index = parameter_names.len() + 1;
+                parameter_names.push(name.to_string());
+                parameter_indexes.insert(name.to_string(), index);
+                index
+            }
+        };
+        let length = input[..closing_parenthesis + 4].chars().count();
+        Some((length, format!("${index}")))
+    });
+
+    (output, parameter_names)
 }
 
 impl std::fmt::Display for PlaceholderCountMismatch {
@@ -259,6 +319,14 @@ mod tests {
                 placeholders: 1,
                 parameters: 2,
             }),
+        );
+    }
+
+    #[test]
+    fn preserves_escaped_positional_placeholder_as_literal_text() {
+        assert_eq!(
+            rewrite_django_placeholders("SELECT %%s, %s::TEXT", 1),
+            Ok("SELECT %s, $1::TEXT".to_string()),
         );
     }
 
@@ -323,6 +391,46 @@ mod tests {
         assert_eq!(
             rewrite_django_placeholders(r"SELECT E'it\'s %s', %s::TEXT", 1,),
             Ok(r"SELECT E'it\'s %s', $1::TEXT".to_string()),
+        );
+    }
+
+    #[test]
+    fn rewrites_named_placeholders_in_sql_order() {
+        assert_eq!(
+            rewrite_django_named_placeholders(
+                "SELECT %(second)s::TEXT, %(first)s::TEXT, %(second)s::TEXT",
+            ),
+            (
+                "SELECT $1::TEXT, $2::TEXT, $1::TEXT".to_string(),
+                vec!["second".to_string(), "first".to_string()],
+            ),
+        );
+    }
+
+    #[test]
+    fn ignores_named_placeholder_text_outside_normal_sql() {
+        assert_eq!(
+            rewrite_django_named_placeholders(
+                "SELECT '%(quoted)s', \"%(identifier)s\", %(value)s::TEXT \
+                 -- %(line_comment)s\n/* %(block_comment)s */ $$%(dollar)s$$",
+            ),
+            (
+                "SELECT '%(quoted)s', \"%(identifier)s\", $1::TEXT \
+                 -- %(line_comment)s\n/* %(block_comment)s */ $$%(dollar)s$$"
+                    .to_string(),
+                vec!["value".to_string()],
+            ),
+        );
+    }
+
+    #[test]
+    fn preserves_escaped_named_placeholder_as_literal_text() {
+        assert_eq!(
+            rewrite_django_named_placeholders("SELECT %%(name)s, %(name)s::TEXT"),
+            (
+                "SELECT %(name)s, $1::TEXT".to_string(),
+                vec!["name".to_string()],
+            ),
         );
     }
 }

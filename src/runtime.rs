@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::cancellation::CancellationGuard;
 use crate::error::NativeError;
-use crate::parameter::QueryParameter;
+use crate::parameter::QueryParameters;
 use crate::pool::PoolHandle;
 use crate::postgres::{self, QueryResult};
 use crate::transaction::{self, TransactionHandle};
@@ -24,7 +24,7 @@ enum Command {
     Execute {
         pool: PoolHandle,
         sql: String,
-        params: Vec<QueryParameter>,
+        params: QueryParameters,
         cancellation: oneshot::Receiver<()>,
         response: oneshot::Sender<Result<QueryResult, NativeError>>,
     },
@@ -84,7 +84,7 @@ pub(crate) async fn probe(delay_ms: u64) -> Result<u64, NativeError> {
 pub(crate) async fn execute(
     pool: PoolHandle,
     sql: String,
-    params: Vec<QueryParameter>,
+    params: QueryParameters,
 ) -> Result<QueryResult, NativeError> {
     let (mut cancellation_guard, cancellation) = CancellationGuard::new();
     let service = RuntimeService::start();
@@ -252,7 +252,7 @@ async fn handle_command(command: Command, pools: PoolRegistry) {
             response,
         } => {
             let result = match get_or_create_pool(&pools, &pool).await {
-                Ok(pool) => postgres::execute(&pool, &sql, &params, &mut cancellation).await,
+                Ok(pool) => postgres::execute(&pool, &sql, params, &mut cancellation).await,
                 Err(error) => Err(error),
             };
             // Cancellation may drop the receiver before this task completes.

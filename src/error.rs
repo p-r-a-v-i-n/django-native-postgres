@@ -16,6 +16,7 @@ pub(crate) enum NativeError {
         source: tokio_postgres::Error,
     },
     PlaceholderCountMismatch(crate::placeholders::PlaceholderCountMismatch),
+    MissingNamedParameter(String),
     UnsupportedPostgresType {
         column: usize,
         type_name: String,
@@ -69,6 +70,12 @@ impl std::fmt::Display for NativeError {
                 )
             }
             Self::PlaceholderCountMismatch(error) => error.fmt(formatter),
+            Self::MissingNamedParameter(name) => {
+                write!(
+                    formatter,
+                    "SQL placeholder {name:?} has no matching parameter"
+                )
+            }
             Self::UnsupportedPostgresType { column, type_name } => {
                 write!(
                     formatter,

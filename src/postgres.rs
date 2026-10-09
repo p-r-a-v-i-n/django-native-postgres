@@ -1,6 +1,5 @@
 use crate::error::NativeError;
-use crate::parameter::QueryParameter;
-use crate::placeholders::rewrite_django_placeholders;
+use crate::parameter::QueryParameters;
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod};
 use futures_util::TryStreamExt;
 use pyo3::prelude::*;
@@ -61,18 +60,17 @@ pub(crate) async fn execute_on_client<C>(
     client: &C,
     cancel_token: CancelToken,
     sql: &str,
-    params: &[QueryParameter],
+    params: QueryParameters,
     cancellation: &mut oneshot::Receiver<()>,
 ) -> Result<QueryResult, NativeError>
 where
     C: GenericClient + Sync,
 {
+    let (postgres_sql, params) = params.prepare(sql)?;
     let postgres_params: Vec<(&(dyn ToSql + Sync), Type)> = params
         .iter()
         .map(|parameter| (parameter.as_postgres(), parameter.postgres_type()))
         .collect();
-
-    let postgres_sql = rewrite_django_placeholders(sql, params.len())?;
 
     let query = client.query_typed_raw(
         postgres_sql.as_str(),
@@ -210,7 +208,7 @@ where
 pub(crate) async fn execute(
     pool: &Pool,
     sql: &str,
-    params: &[QueryParameter],
+    params: QueryParameters,
     cancellation: &mut oneshot::Receiver<()>,
 ) -> Result<QueryResult, NativeError> {
     let client = tokio::select! {

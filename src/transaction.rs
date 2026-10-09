@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::cancellation::CancellationGuard;
 use crate::error::NativeError;
-use crate::parameter::QueryParameter;
+use crate::parameter::QueryParameters;
 use crate::postgres::{self, QueryResult};
 use crate::transaction_options::TransactionOptions;
 use deadpool_postgres::{Object, Pool};
@@ -16,7 +16,7 @@ use tokio_postgres::NoTls;
 pub(crate) enum TransactionCommand {
     Execute {
         sql: String,
-        params: Vec<QueryParameter>,
+        params: QueryParameters,
         cancellation: oneshot::Receiver<()>,
         response: oneshot::Sender<Result<QueryResult, NativeError>>,
     },
@@ -103,7 +103,7 @@ pub(crate) async fn begin(
 pub(crate) async fn execute(
     handle: TransactionHandle,
     sql: String,
-    params: Vec<QueryParameter>,
+    params: QueryParameters,
 ) -> Result<QueryResult, NativeError> {
     handle.validate_process()?;
     if handle.is_closed() {
@@ -254,7 +254,7 @@ async fn run_transaction(
                     &*transaction,
                     cancel_token,
                     &sql,
-                    &params,
+                    params,
                     &mut cancellation,
                 )
                 .await;

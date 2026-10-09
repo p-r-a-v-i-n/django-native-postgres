@@ -138,6 +138,22 @@ async def test_transaction_execute_with_metadata_returns_column_names(postgres_p
 
 
 @pytest.mark.asyncio
+async def test_transaction_execute_accepts_named_parameters(postgres_pool):
+    transaction = await _native.begin_transaction(postgres_pool)
+
+    try:
+        rows = await _native.execute_transaction(
+            transaction=transaction,
+            sql="SELECT %(value)s::TEXT, %(value)s::TEXT",
+            params={"value": "Django"},
+        )
+    finally:
+        await _native.rollback_transaction(transaction)
+
+    assert rows == [["Django", "Django"]]
+
+
+@pytest.mark.asyncio
 async def test_transaction_execute_result_returns_write_count(postgres_pool):
     transaction = await _native.begin_transaction(postgres_pool)
 
@@ -780,6 +796,34 @@ async def test_execute_accepts_multiple_django_text_parameters(
     )
 
     assert rows == [["Django", "Rust"]]
+
+
+@pytest.mark.asyncio
+async def test_execute_accepts_named_parameters_in_sql_order(postgres_pool):
+    rows = await _native.execute(
+        pool=postgres_pool,
+        sql=("SELECT 5 %% 2, %(second)s::TEXT, %(first)s::TEXT, %(second)s::TEXT"),
+        params={
+            "first": "Django",
+            "second": "Rust",
+            "unused": "ignored",
+        },
+    )
+
+    assert rows == [[1, "Rust", "Django", "Rust"]]
+
+
+@pytest.mark.asyncio
+async def test_execute_rejects_missing_named_parameter(postgres_pool):
+    with pytest.raises(
+        RuntimeError,
+        match='SQL placeholder "missing" has no matching parameter',
+    ):
+        await _native.execute(
+            pool=postgres_pool,
+            sql="SELECT %(missing)s::TEXT",
+            params={"unused": "Django"},
+        )
 
 
 @pytest.mark.asyncio

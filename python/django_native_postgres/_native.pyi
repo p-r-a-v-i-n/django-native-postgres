@@ -1,4 +1,7 @@
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+
+type QueryParameter = str | int | None
+type QueryParameters = Sequence[QueryParameter] | Mapping[str, QueryParameter]
 
 class PostgresIntegrityError(RuntimeError): ...
 class PoolHandle: ...
@@ -22,32 +25,32 @@ async def begin_transaction(
 async def execute_transaction(
     transaction: TransactionHandle,
     sql: str,
-    params: Sequence[str | int | None] | None = None,
+    params: QueryParameters | None = None,
 ) -> list[list[str | int | None]]: ...
 async def execute_transaction_result(
     transaction: TransactionHandle,
     sql: str,
-    params: Sequence[str | int | None] | None = None,
+    params: QueryParameters | None = None,
 ) -> tuple[list[list[str | int | None]], int]: ...
 async def execute_transaction_with_metadata(
     transaction: TransactionHandle,
     sql: str,
-    params: Sequence[str | int | None] | None = None,
+    params: QueryParameters | None = None,
 ) -> tuple[list[list[str | int | None]], int, list[str]]: ...
 async def commit_transaction(transaction: TransactionHandle) -> None: ...
 async def rollback_transaction(transaction: TransactionHandle) -> None: ...
 async def execute(
     pool: PoolHandle,
     sql: str,
-    params: Sequence[str | int | None] | None = None,
+    params: QueryParameters | None = None,
 ) -> list[list[str | int | None]]: ...
 async def execute_result(
     pool: PoolHandle,
     sql: str,
-    params: Sequence[str | int | None] | None = None,
+    params: QueryParameters | None = None,
 ) -> tuple[list[list[str | int | None]], int]: ...
 async def execute_with_metadata(
     pool: PoolHandle,
     sql: str,
-    params: Sequence[str | int | None] | None = None,
+    params: QueryParameters | None = None,
 ) -> tuple[list[list[str | int | None]], int, list[str]]: ...

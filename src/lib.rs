@@ -67,7 +67,7 @@ async fn begin_transaction(
 async fn execute_transaction(
     transaction: Py<transaction::TransactionHandle>,
     sql: String,
-    params: Option<Vec<parameter::QueryParameter>>,
+    params: Option<parameter::QueryParameters>,
 ) -> PyResult<postgres::QueryRows> {
     transaction::execute(transaction.get().clone(), sql, params.unwrap_or_default())
         .await
@@ -79,7 +79,7 @@ async fn execute_transaction(
 async fn execute_transaction_result(
     transaction: Py<transaction::TransactionHandle>,
     sql: String,
-    params: Option<Vec<parameter::QueryParameter>>,
+    params: Option<parameter::QueryParameters>,
 ) -> PyResult<(postgres::QueryRows, u64)> {
     transaction::execute(transaction.get().clone(), sql, params.unwrap_or_default())
         .await
@@ -91,7 +91,7 @@ async fn execute_transaction_result(
 async fn execute_transaction_with_metadata(
     transaction: Py<transaction::TransactionHandle>,
     sql: String,
-    params: Option<Vec<parameter::QueryParameter>>,
+    params: Option<parameter::QueryParameters>,
 ) -> PyResult<(postgres::QueryRows, u64, postgres::QueryColumns)> {
     transaction::execute(transaction.get().clone(), sql, params.unwrap_or_default())
         .await
@@ -117,7 +117,7 @@ async fn rollback_transaction(transaction: Py<transaction::TransactionHandle>) -
 async fn execute(
     pool: Py<pool::PoolHandle>,
     sql: String,
-    params: Option<Vec<parameter::QueryParameter>>,
+    params: Option<parameter::QueryParameters>,
 ) -> PyResult<postgres::QueryRows> {
     runtime::execute(pool.get().clone(), sql, params.unwrap_or_default())
         .await
@@ -129,7 +129,7 @@ async fn execute(
 async fn execute_result(
     pool: Py<pool::PoolHandle>,
     sql: String,
-    params: Option<Vec<parameter::QueryParameter>>,
+    params: Option<parameter::QueryParameters>,
 ) -> PyResult<(postgres::QueryRows, u64)> {
     runtime::execute(pool.get().clone(), sql, params.unwrap_or_default())
         .await
@@ -141,7 +141,7 @@ async fn execute_result(
 async fn execute_with_metadata(
     pool: Py<pool::PoolHandle>,
     sql: String,
-    params: Option<Vec<parameter::QueryParameter>>,
+    params: Option<parameter::QueryParameters>,
 ) -> PyResult<(postgres::QueryRows, u64, postgres::QueryColumns)> {
     runtime::execute(pool.get().clone(), sql, params.unwrap_or_default())
         .await

@@ -1221,6 +1221,29 @@ async def test_django_raw_query_executes_through_native_backend(transactional_db
 
 
 @pytest.mark.asyncio
+async def test_django_raw_query_with_named_parameters_uses_native_backend(
+    transactional_db,
+):
+    await Book.objects.acreate(name="Django")
+    executor = connections["default"].get_async_executor()
+    sql = (
+        'SELECT "id", "name" FROM "integration_app_book" '
+        'WHERE "name" = %(name)s OR "name" = %(name)s'
+    )
+    params = {"name": "Django", "unused": "ignored"}
+
+    with mock.patch.object(
+        executor,
+        "execute_with_metadata",
+        wraps=executor.execute_with_metadata,
+    ) as execute_with_metadata:
+        books = [book async for book in Book.objects.raw(sql, params)]
+
+    assert [book.name for book in books] == ["Django"]
+    execute_with_metadata.assert_awaited_once_with(sql=sql, params=params)
+
+
+@pytest.mark.asyncio
 async def test_django_raw_query_supports_prefetch_and_empty_results(transactional_db):
     article = await Article.objects.acreate(title="article")
     tag = await Tag.objects.acreate(name="tag")
