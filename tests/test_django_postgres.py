@@ -166,8 +166,13 @@ async def test_django_connection_uses_active_native_transaction(transactional_db
 
 @pytest.mark.asyncio
 async def test_django_async_atomic_commits_and_rolls_back(transactional_db):
+    assert transaction.get_autocommit() is True
+
     async with transaction.atomic():
+        assert transaction.get_autocommit() is False
         await Book.objects.acreate(name="committed")
+
+    assert transaction.get_autocommit() is True
 
     with pytest.raises(ValueError, match="roll back"):
         async with transaction.atomic():
