@@ -3,7 +3,15 @@ import multiprocessing
 import os
 
 import pytest
-from django.db import IntegrityError
+from django.db import (
+    DataError,
+    IntegrityError,
+    InterfaceError,
+    InternalError,
+    NotSupportedError,
+    OperationalError,
+    ProgrammingError,
+)
 from django_native_postgres import _native
 from django_native_postgres.executor import NativeExecutor
 
@@ -889,14 +897,183 @@ async def test_execute_exposes_postgres_integrity_errors(postgres_pool):
             (1,),
         )
 
-        with pytest.raises(_native.PostgresIntegrityError):
+        with pytest.raises(_native.PostgresIntegrityError) as error:
             await _native.execute_transaction(
                 transaction,
                 "INSERT INTO native_unique VALUES (%s)",
                 (1,),
             )
+
+        assert isinstance(error.value, _native.PostgresDatabaseError)
+        assert error.value.sqlstate == "23505"
+        assert error.value.severity == "ERROR"
+        assert "duplicate key value" in error.value.message_primary
+        assert "(value)=(1)" in error.value.detail
+        assert error.value.hint is None
+        assert error.value.schema_name.startswith("pg_temp")
+        assert error.value.table_name == "native_unique"
+        assert error.value.column_name is None
+        assert error.value.datatype_name is None
+        assert error.value.constraint_name == "native_unique_value_key"
     finally:
         await _native.rollback_transaction(transaction)
+
+
+@pytest.mark.asyncio
+async def test_execute_exposes_postgres_sqlstate(postgres_pool):
+    with pytest.raises(_native.PostgresDatabaseError) as error:
+        await _native.execute(
+            pool=postgres_pool,
+            sql="SELECT * FROM missing_native_error_mapping_table",
+        )
+
+    assert error.value.sqlstate == "42P01"
+
+
+@pytest.mark.asyncio
+async def test_executor_maps_postgres_programming_errors(postgres_database_url):
+    executor = NativeExecutor(database_url=postgres_database_url)
+
+    try:
+        with pytest.raises(ProgrammingError) as error:
+            await executor.execute(
+                sql="SELECT * FROM missing_error_mapping_table",
+            )
+    finally:
+        await executor.close()
+
+    assert isinstance(error.value.__cause__, _native.PostgresDatabaseError)
+    assert error.value.__cause__.sqlstate == "42P01"
+
+
+@pytest.mark.asyncio
+async def test_executor_maps_postgres_data_errors(postgres_database_url):
+    executor = NativeExecutor(database_url=postgres_database_url)
+
+    try:
+        with pytest.raises(DataError) as error:
+            await executor.execute(sql="SELECT 'not-an-integer'::BIGINT")
+    finally:
+        await executor.close()
+
+    assert isinstance(error.value.__cause__, _native.PostgresDatabaseError)
+    assert error.value.__cause__.sqlstate == "22P02"
+
+
+@pytest.mark.asyncio
+async def test_executor_maps_deferred_constraint_errors_on_commit(
+    postgres_database_url,
+):
+    executor = NativeExecutor(
+        database_url=postgres_database_url,
+        pool_max_size=1,
+    )
+
+    try:
+        await executor.execute(
+            sql=(
+                "CREATE TEMP TABLE deferred_unique ("
+                "value BIGINT, "
+                "CONSTRAINT deferred_unique_value UNIQUE (value) "
+                "DEFERRABLE INITIALLY DEFERRED)"
+            )
+        )
+
+        with pytest.raises(IntegrityError) as error:
+            async with executor.transaction():
+                await executor.execute(
+                    sql="INSERT INTO deferred_unique VALUES (%s), (%s)",
+                    params=(1, 1),
+                )
+    finally:
+        await executor.close()
+
+    assert isinstance(error.value.__cause__, _native.PostgresIntegrityError)
+    assert error.value.__cause__.sqlstate == "23505"
+    assert error.value.__cause__.constraint_name == "deferred_unique_value"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sqlstate", ["40001", "40P01"])
+async def test_executor_maps_retryable_transaction_errors(
+    postgres_database_url,
+    sqlstate,
+):
+    executor = NativeExecutor(database_url=postgres_database_url)
+
+    try:
+        with pytest.raises(OperationalError) as error:
+            await executor.execute(
+                sql=(
+                    "DO $error$ BEGIN "
+                    "RAISE EXCEPTION 'forced transaction failure' "
+                    f"USING ERRCODE = '{sqlstate}'; "
+                    "END $error$"
+                )
+            )
+    finally:
+        await executor.close()
+
+    assert isinstance(error.value.__cause__, _native.PostgresDatabaseError)
+    assert error.value.__cause__.sqlstate == sqlstate
+
+
+@pytest.mark.asyncio
+async def test_executor_maps_connection_failures_without_exposing_url():
+    password = "secret-password"
+    executor = NativeExecutor(
+        database_url=(f"postgresql://missing:{password}@127.0.0.1:1/missing_database"),
+        pool_wait_timeout_ms=100,
+    )
+
+    try:
+        with pytest.raises(OperationalError) as error:
+            await executor.execute(sql="SELECT 1")
+    finally:
+        await executor.close()
+
+    assert isinstance(error.value.__cause__, _native.PostgresOperationalError)
+    assert password not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_executor_maps_placeholder_errors(postgres_database_url):
+    executor = NativeExecutor(database_url=postgres_database_url)
+
+    try:
+        with pytest.raises(ProgrammingError) as error:
+            await executor.execute(
+                sql="SELECT %s::TEXT",
+                params=("first", "second"),
+            )
+    finally:
+        await executor.close()
+
+    assert isinstance(error.value.__cause__, _native.PostgresProgrammingError)
+
+
+@pytest.mark.asyncio
+async def test_executor_maps_unsupported_postgres_types(postgres_database_url):
+    executor = NativeExecutor(database_url=postgres_database_url)
+
+    try:
+        with pytest.raises(NotSupportedError) as error:
+            await executor.execute(sql="SELECT TRUE")
+    finally:
+        await executor.close()
+
+    assert isinstance(error.value.__cause__, _native.PostgresNotSupportedError)
+
+
+@pytest.mark.asyncio
+async def test_executor_maps_closed_pool_errors(postgres_database_url):
+    executor = NativeExecutor(database_url=postgres_database_url)
+    await executor.close()
+
+    with pytest.raises(InterfaceError) as error:
+        await executor.execute(sql="SELECT 1")
+
+    assert isinstance(error.value.__cause__, _native.PostgresInterfaceError)
 
 
 @pytest.mark.asyncio
@@ -1651,7 +1828,7 @@ async def test_read_only_transaction_rejects_writes(postgres_database_url):
             sql="CREATE TABLE native_read_only_transaction (value BIGINT)"
         )
 
-        with pytest.raises(RuntimeError, match="PostgreSQL query failed"):
+        with pytest.raises(InternalError, match="PostgreSQL query failed"):
             async with executor.transaction(read_only=True):
                 await executor.execute(
                     sql="INSERT INTO native_read_only_transaction VALUES (1)"
@@ -1752,7 +1929,7 @@ def test_transaction_handle_is_rejected_after_fork(postgres_database_url):
         assert receiver.poll()
 
         error_type, message = receiver.recv()
-        assert error_type == "RuntimeError"
+        assert error_type == "PostgresInterfaceError"
         assert message == (
             "PostgreSQL transaction handle belongs to a different process"
         )

@@ -3,11 +3,102 @@ from unittest import mock
 
 import pytest
 from django.core.exceptions import ImproperlyConfigured
-from django.db import connections
+from django.db import (
+    DatabaseError,
+    DataError,
+    IntegrityError,
+    InterfaceError,
+    InternalError,
+    NotSupportedError,
+    OperationalError,
+    ProgrammingError,
+    connections,
+)
+from django_native_postgres import _native
 from django_native_postgres.base import DatabaseWrapper
 from django_native_postgres.cursor import NativeAsyncCursor
-from django_native_postgres.executor import NativeExecutor
+from django_native_postgres.executor import (
+    NativeExecutor,
+    _django_database_error_class,
+    _translate_database_error,
+)
 from psycopg.conninfo import conninfo_to_dict
+
+
+@pytest.mark.parametrize(
+    ("error_class", "sqlstates"),
+    [
+        (DataError, ("22000",)),
+        (IntegrityError, ("23000",)),
+        (InternalError, ("24000", "25000", "2B000", "2D000", "XX000")),
+        (
+            OperationalError,
+            (
+                "08000",
+                "27000",
+                "28000",
+                "2F000",
+                "38000",
+                "39000",
+                "3B000",
+                "40001",
+                "53000",
+                "54000",
+                "55000",
+                "57014",
+                "58000",
+                "F0000",
+                "HV000",
+            ),
+        ),
+        (
+            ProgrammingError,
+            (
+                "10000",
+                "20000",
+                "21000",
+                "26000",
+                "34000",
+                "3D000",
+                "3F000",
+                "42000",
+                "44000",
+                "P0000",
+            ),
+        ),
+        (NotSupportedError, ("0A000",)),
+        (DatabaseError, ("02000", "ZZ000")),
+    ],
+)
+def test_postgres_sqlstate_maps_to_django_error(error_class, sqlstates):
+    for sqlstate in sqlstates:
+        assert _django_database_error_class(sqlstate) is error_class
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("native_error_class", "django_error_class"),
+    [
+        (_native.PostgresDataError, DataError),
+        (_native.PostgresInterfaceError, InterfaceError),
+        (_native.PostgresNotSupportedError, NotSupportedError),
+        (_native.PostgresOperationalError, OperationalError),
+        (_native.PostgresProgrammingError, ProgrammingError),
+    ],
+)
+async def test_native_errors_map_to_django_errors(
+    native_error_class,
+    django_error_class,
+):
+    native_error = native_error_class("native failure")
+
+    async def fail():
+        raise native_error
+
+    with pytest.raises(django_error_class) as error:
+        await _translate_database_error(fail())
+
+    assert error.value.__cause__ is native_error
 
 
 def test_database_wrapper_builds_and_caches_native_executor():
