@@ -198,7 +198,7 @@ The main areas still being developed are:
 3. TLS and additional PostgreSQL connection options;
 4. session initialization and reset behavior;
 5. broader Django compatibility testing; and
-6. reproducible installation of the Django fork dependency.
+6. publishing a prebuilt Django fork artifact for installations without Git.
 
 These areas can be added incrementally without changing the core ownership
 model. Unsupported native values already fail explicitly, and native connection

@@ -5,9 +5,12 @@ from django.db.backends.postgresql.base import (
 from psycopg.conninfo import make_conninfo
 
 from django_native_postgres.cursor import NativeAsyncCursor
+from django_native_postgres.django_compatibility import require_native_async_django
 from django_native_postgres.executor import NativeExecutor
 from django_native_postgres.features import DatabaseFeatures
 from django_native_postgres.operations import DatabaseOperations
+
+require_native_async_django()
 
 
 class DatabaseWrapper(PostgreSQLDatabaseWrapper):

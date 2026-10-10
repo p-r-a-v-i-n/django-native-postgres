@@ -294,10 +294,10 @@ fn new_postgres_database_error(
 }
 
 fn to_python_error(error: NativeError) -> PyErr {
-    if let Some(source) = postgres_error_source(&error) {
-        if let Some(database_error) = source.as_db_error() {
-            return new_postgres_database_error(&error, database_error);
-        }
+    if let Some(source) = postgres_error_source(&error)
+        && let Some(database_error) = source.as_db_error()
+    {
+        return new_postgres_database_error(&error, database_error);
     }
 
     match error {

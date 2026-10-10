@@ -1,0 +1,217 @@
+name: Distributions
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/distributions.yml
+      - Cargo.lock
+      - Cargo.toml
+      - README.md
+      - pyproject.toml
+      - python/**
+      - src/**
+      - tests/wheel_smoke.py
+      - uv.lock
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/distributions.yml
+      - Cargo.lock
+      - Cargo.toml
+      - README.md
+      - pyproject.toml
+      - python/**
+      - src/**
+      - tests/wheel_smoke.py
+      - uv.lock
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: distributions-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MATURIN_VERSION: "v1.15.0"
+  UV_VERSION: "0.13.0"
+
+jobs:
+  pull-request-wheel:
+    name: Pull request wheel (manylinux x86-64)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: |
+            Cargo.lock
+            uv.lock
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: build
+          maturin-version: ${{ env.MATURIN_VERSION }}
+          target: x86_64
+          manylinux: "2_17"
+          args: --release --locked --compatibility pypi --out dist
+
+      - name: Export the pinned runtime dependencies
+        run: >-
+          uv export --locked --no-dev --no-emit-project
+          --output-file wheel-requirements.txt
+
+      - name: Create wheel test environment
+        run: uv venv --python 3.12 .wheel-venv
+
+      - name: Install the pinned runtime dependencies
+        run: >-
+          uv pip install --python .wheel-venv
+          --requirements wheel-requirements.txt
+
+      - name: Install the Psycopg binary implementation
+        run: uv pip install --python .wheel-venv "psycopg[binary]>=3.1.12"
+
+      - name: Install the built wheel
+        run: >-
+          uv pip install --python .wheel-venv --no-deps --no-index
+          --find-links dist django-native-postgres
+
+      - name: Smoke-test the built wheel
+        run: >-
+          uv run --no-project --python .wheel-venv
+          python -I tests/wheel_smoke.py
+
+  wheels:
+    name: Wheel (${{ matrix.platform.name }})
+    if: github.event_name != 'pull_request'
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: manylinux x86-64
+            runner: ubuntu-latest
+            target: x86_64
+            manylinux: "2_17"
+            artifact: manylinux-x86_64
+          - name: manylinux ARM64
+            runner: ubuntu-24.04-arm
+            target: aarch64
+            manylinux: "2_17"
+            artifact: manylinux-aarch64
+          - name: macOS Intel
+            runner: macos-15-intel
+            target: x86_64
+            manylinux: "off"
+            artifact: macos-x86_64
+          - name: macOS Apple Silicon
+            runner: macos-15
+            target: aarch64
+            manylinux: "off"
+            artifact: macos-aarch64
+          - name: Windows x86-64
+            runner: windows-2025
+            target: x64
+            manylinux: "off"
+            artifact: windows-x86_64
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: |
+            Cargo.lock
+            uv.lock
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: build
+          maturin-version: ${{ env.MATURIN_VERSION }}
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux }}
+          args: --release --locked --compatibility pypi --out dist
+
+      - name: Export the pinned runtime dependencies
+        run: >-
+          uv export --locked --no-dev --no-emit-project
+          --output-file wheel-requirements.txt
+
+      - name: Create wheel test environment
+        run: uv venv --python 3.12 .wheel-venv
+
+      - name: Install the pinned runtime dependencies
+        run: >-
+          uv pip install --python .wheel-venv
+          --requirements wheel-requirements.txt
+
+      - name: Install the Psycopg binary implementation
+        run: uv pip install --python .wheel-venv "psycopg[binary]>=3.1.12"
+
+      - name: Install the built wheel
+        run: >-
+          uv pip install --python .wheel-venv --no-deps --no-index
+          --find-links dist django-native-postgres
+
+      - name: Smoke-test the built wheel
+        run: >-
+          uv run --no-project --python .wheel-venv
+          python -I tests/wheel_smoke.py
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wheel-${{ matrix.platform.artifact }}
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 7
+
+  sdist:
+    name: Source distribution
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build source distribution
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: sdist
+          maturin-version: ${{ env.MATURIN_VERSION }}
+          args: --out dist
+
+      - name: Upload source distribution
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: source-distribution
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
