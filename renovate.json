@@ -1,0 +1,143 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "Configuration options and package rules: https://docs.renovatebot.com/configuration-options/",
+    "Regex custom managers: https://docs.renovatebot.com/modules/manager/regex/",
+    "Dependency Dashboard: https://docs.renovatebot.com/key-concepts/dashboard/",
+    "Scheduling: https://docs.renovatebot.com/key-concepts/scheduling/"
+  ],
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests",
+    ":configMigration",
+    ":maintainLockFilesWeekly"
+  ],
+  "timezone": "Asia/Kolkata",
+  "schedule": ["before 6am on monday"],
+  "dependencyDashboard": true,
+  "semanticCommits": "enabled",
+  "osvVulnerabilityAlerts": true,
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 2,
+  "packageRules": [
+    {
+      "description": "Keep the supported Python floor a deliberate decision",
+      "matchManagers": ["pep621"],
+      "matchDepTypes": ["requires-python"],
+      "enabled": false
+    },
+    {
+      "description": "Group Python build and development tooling",
+      "matchManagers": ["pep621"],
+      "matchDepTypes": ["build-system.requires", "dependency-groups"],
+      "groupName": "Python tooling"
+    },
+    {
+      "description": "Keep the tested Django fork revision a deliberate decision",
+      "matchPackageNames": ["django"],
+      "enabled": false
+    },
+    {
+      "description": "Wait briefly before adopting new PyPI releases",
+      "matchDatasources": ["pypi"],
+      "minimumReleaseAge": "3 days"
+    },
+    {
+      "description": "Group GitHub Actions updates",
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions"
+    },
+    {
+      "description": "Include the central uv version with CI tooling updates",
+      "matchManagers": ["custom.regex"],
+      "matchPackageNames": ["astral-sh/uv"],
+      "groupName": "GitHub Actions"
+    },
+    {
+      "description": "Include the wheel-builder version with CI tooling updates",
+      "matchManagers": ["custom.regex"],
+      "matchPackageNames": ["PyO3/maturin"],
+      "groupName": "GitHub Actions"
+    },
+    {
+      "description": "Keep the Rust minimum and CI toolchain aligned",
+      "matchManagers": ["custom.regex"],
+      "matchDatasources": ["rust-version"],
+      "matchDepNames": ["rust"],
+      "groupName": "Rust toolchain",
+      "rangeStrategy": "replace"
+    },
+    {
+      "description": "Keep PostgreSQL test images aligned",
+      "matchPackageNames": ["postgres"],
+      "groupName": "PostgreSQL test image"
+    },
+    {
+      "description": "Require approval for major updates",
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Track the uv version used by GitHub Actions",
+      "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
+      "matchStrings": [
+        "UV_VERSION: \\\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\\\""
+      ],
+      "depNameTemplate": "uv",
+      "packageNameTemplate": "astral-sh/uv",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Track the Maturin version used to build wheels",
+      "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
+      "matchStrings": [
+        "MATURIN_VERSION: \\\"v(?<currentValue>\\d+\\.\\d+\\.\\d+)\\\""
+      ],
+      "depNameTemplate": "maturin",
+      "packageNameTemplate": "PyO3/maturin",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Track the minimum supported Rust version",
+      "managerFilePatterns": ["/^Cargo\\.toml$/"],
+      "matchStrings": [
+        "rust-version\\s*=\\s*\\\"(?<currentValue>[^\\\"]+)\\\""
+      ],
+      "depNameTemplate": "rust",
+      "depTypeTemplate": "rust-version",
+      "datasourceTemplate": "rust-version",
+      "versioningTemplate": "rust-release-channel"
+    },
+    {
+      "customType": "regex",
+      "description": "Track the Rust version used by GitHub Actions",
+      "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
+      "matchStrings": [
+        "toolchain: \\\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\\\""
+      ],
+      "depNameTemplate": "rust",
+      "depTypeTemplate": "rust-version",
+      "datasourceTemplate": "rust-version",
+      "versioningTemplate": "rust-release-channel"
+    },
+    {
+      "customType": "regex",
+      "description": "Track the PostgreSQL image used by local integration tests",
+      "managerFilePatterns": ["/^Justfile$/"],
+      "matchStrings": [
+        "postgres_image := env_var_or_default\\(\\\"DNP_POSTGRES_IMAGE\\\", \\\"postgres:(?<currentValue>[^\\\"]+)\\\"\\)"
+      ],
+      "depNameTemplate": "postgres",
+      "packageNameTemplate": "postgres",
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker"
+    }
+  ]
+}
