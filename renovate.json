@@ -48,9 +48,47 @@
       "groupName": "GitHub Actions"
     },
     {
+      "description": "Include the central uv version with CI tooling updates",
+      "matchManagers": ["custom.regex"],
+      "matchPackageNames": ["astral-sh/uv"],
+      "groupName": "GitHub Actions"
+    },
+    {
+      "description": "Include the wheel-builder version with CI tooling updates",
+      "matchManagers": ["custom.regex"],
+      "matchPackageNames": ["PyO3/maturin"],
+      "groupName": "GitHub Actions"
+    },
+    {
       "description": "Require approval for major updates",
       "matchUpdateTypes": ["major"],
       "dependencyDashboardApproval": true
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Track the uv version used by GitHub Actions",
+      "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
+      "matchStrings": [
+        "UV_VERSION: \\\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\\\""
+      ],
+      "depNameTemplate": "uv",
+      "packageNameTemplate": "astral-sh/uv",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Track the Maturin version used to build wheels",
+      "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
+      "matchStrings": [
+        "MATURIN_VERSION: \\\"v(?<currentValue>\\d+\\.\\d+\\.\\d+)\\\""
+      ],
+      "depNameTemplate": "maturin",
+      "packageNameTemplate": "PyO3/maturin",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver"
     }
   ]
 }
