@@ -60,6 +60,19 @@
       "groupName": "GitHub Actions"
     },
     {
+      "description": "Keep the Rust minimum and CI toolchain aligned",
+      "matchManagers": ["custom.regex"],
+      "matchDatasources": ["rust-version"],
+      "matchDepNames": ["rust"],
+      "groupName": "Rust toolchain",
+      "rangeStrategy": "replace"
+    },
+    {
+      "description": "Keep PostgreSQL test images aligned",
+      "matchPackageNames": ["postgres"],
+      "groupName": "PostgreSQL test image"
+    },
+    {
       "description": "Require approval for major updates",
       "matchUpdateTypes": ["major"],
       "dependencyDashboardApproval": true
@@ -89,6 +102,42 @@
       "packageNameTemplate": "PyO3/maturin",
       "datasourceTemplate": "github-releases",
       "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Track the minimum supported Rust version",
+      "managerFilePatterns": ["/^Cargo\\.toml$/"],
+      "matchStrings": [
+        "rust-version\\s*=\\s*\\\"(?<currentValue>[^\\\"]+)\\\""
+      ],
+      "depNameTemplate": "rust",
+      "depTypeTemplate": "rust-version",
+      "datasourceTemplate": "rust-version",
+      "versioningTemplate": "rust-release-channel"
+    },
+    {
+      "customType": "regex",
+      "description": "Track the Rust version used by GitHub Actions",
+      "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
+      "matchStrings": [
+        "toolchain: \\\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\\\""
+      ],
+      "depNameTemplate": "rust",
+      "depTypeTemplate": "rust-version",
+      "datasourceTemplate": "rust-version",
+      "versioningTemplate": "rust-release-channel"
+    },
+    {
+      "customType": "regex",
+      "description": "Track the PostgreSQL image used by local integration tests",
+      "managerFilePatterns": ["/^Justfile$/"],
+      "matchStrings": [
+        "postgres_image := env_var_or_default\\(\\\"DNP_POSTGRES_IMAGE\\\", \\\"postgres:(?<currentValue>[^\\\"]+)\\\"\\)"
+      ],
+      "depNameTemplate": "postgres",
+      "packageNameTemplate": "postgres",
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker"
     }
   ]
 }
