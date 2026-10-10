@@ -169,9 +169,6 @@ Start with the [documentation index](docs/index.md). Important references are:
 - [Supported PostgreSQL values](docs/supported-types.md)
 - [Compatibility and limitations](docs/compatibility.md)
 
-The documentation is written in Markdown so it can be published with MkDocs
-later without conversion.
-
 ## License
 
 Licensed under the BSD 3-Clause License. See [LICENSE](LICENSE).
