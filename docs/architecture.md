@@ -180,6 +180,9 @@ transaction handles inherited by another process map to `InterfaceError`.
 The native exception remains available as the Django exception's `__cause__`.
 Error messages do not include the database URL or password.
 
+See [Database errors and diagnostics](database-errors.md) for the complete
+mapping, diagnostic fields, and transaction retry guidance.
+
 ## Synchronous behavior
 
 This backend still subclasses Django's PostgreSQL backend and depends on
