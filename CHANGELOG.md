@@ -2,6 +2,16 @@
 
 This file records user-visible changes to `django-native-postgres`.
 
+## 0.1.1 - 2026-10-10
+
+### Changed
+
+- Made the required Django fork installation command prominent and clarified
+  that installing `django-native-postgres` alone cannot resolve the fork from
+  PyPI.
+- Separated published-package installation from source-development
+  requirements in the README.
+
 ## 0.1.0 - 2026-10-10
 
 Initial experimental release.

@@ -9,6 +9,26 @@ and `tokio-postgres`.
 > of PostgreSQL value types, buffers complete query results in memory, and
 > connects without TLS.
 
+## Installation
+
+> [!IMPORTANT]
+> `pip install django-native-postgres` by itself currently fails. This release
+> requires an exact version of the project's Django fork, and that version is
+> not published on PyPI.
+
+Install the Django fork and the backend together in the same command:
+
+```console
+python -m pip install \
+    "Django @ git+https://github.com/p-r-a-v-i-n/django.git@312860d0e58e0d54fef10bae7ecf63f537723d17" \
+    "django-native-postgres==0.1.1"
+```
+
+This installs Django from the pinned Git commit and the backend wheel from
+PyPI. Python 3.12 or newer is required. See
+[Django fork requirement](docs/django-fork.md) for why the fork is currently
+necessary.
+
 ## What this project does
 
 `django-native-postgres` keeps Django's ORM, models, query construction, SQL
@@ -73,24 +93,8 @@ do not use the native async contract.
 
 ## Development quick start
 
-The current version must be used with the exact tested Django fork. Install the
-fork and this package in the same command so the dependency resolver uses the
-required Django distribution:
+Working on the project from source additionally requires:
 
-```console
-python -m pip install \
-    "Django @ git+https://github.com/p-r-a-v-i-n/django.git@312860d0e58e0d54fef10bae7ecf63f537723d17" \
-    django-native-postgres
-```
-
-The package metadata requires the fork's exact generated Django version. A
-plain installation without the fork therefore fails instead of silently using
-an incompatible upstream Django release. See
-[Django fork requirement](docs/django-fork.md) for details.
-
-Requirements:
-
-- Python 3.12 or newer;
 - Rust 1.99 or newer;
 - `uv`;
 - `just`; and
