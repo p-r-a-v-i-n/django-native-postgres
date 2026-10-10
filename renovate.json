@@ -1,0 +1,22 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "Configuration options and package rules: https://docs.renovatebot.com/configuration-options/",
+    "Regex custom managers: https://docs.renovatebot.com/modules/manager/regex/",
+    "Dependency Dashboard: https://docs.renovatebot.com/key-concepts/dashboard/",
+    "Scheduling: https://docs.renovatebot.com/key-concepts/scheduling/"
+  ],
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests",
+    ":configMigration",
+    ":maintainLockFilesWeekly"
+  ],
+  "timezone": "Asia/Kolkata",
+  "schedule": ["before 6am on monday"],
+  "dependencyDashboard": true,
+  "semanticCommits": "enabled",
+  "osvVulnerabilityAlerts": true,
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 2
+}
