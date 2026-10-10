@@ -106,6 +106,9 @@ jobs:
           uv pip install --python .wheel-venv
           --requirements wheel-requirements.txt
 
+      - name: Install the Psycopg binary implementation
+        run: uv pip install --python .wheel-venv "psycopg[binary]>=3.1.12"
+
       - name: Install the built wheel
         run: >-
           uv pip install --python .wheel-venv --no-deps --no-index
