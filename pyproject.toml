@@ -12,7 +12,6 @@ license = "BSD-3-Clause"
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Framework :: Django",
-    "Framework :: Django :: 6.1",
     "License :: OSI Approved :: BSD License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
@@ -21,7 +20,10 @@ classifiers = [
     "Programming Language :: Rust",
     "Topic :: Database",
 ]
-dependencies = ["Django>=6.1", "psycopg>=3.1.12"]
+dependencies = [
+    "Django==6.2.dev20261009125329",
+    "psycopg>=3.1.12",
+]
 
 [dependency-groups]
 dev = [
@@ -49,4 +51,4 @@ target-version = "py312"
 select = ["E", "F", "I", "UP"]
 
 [tool.uv.sources]
-django = { git = "https://github.com/p-r-a-v-i-n/django.git", branch = "feature/native-async-backend-contract" }
+django = { git = "https://github.com/p-r-a-v-i-n/django.git", rev = "312860d0e58e0d54fef10bae7ecf63f537723d17" }

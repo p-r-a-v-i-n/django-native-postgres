@@ -73,9 +73,19 @@ do not use the native async contract.
 
 ## Development quick start
 
-The current version must be used with the tested Django fork. This repository's
-`uv` configuration installs that fork for development, but the source override
-is not inherited by applications installing this package with `pip`. See
+The current version must be used with the exact tested Django fork. Install the
+fork and this package in the same command so the dependency resolver uses the
+required Django distribution:
+
+```console
+python -m pip install \
+    "Django @ git+https://github.com/p-r-a-v-i-n/django.git@312860d0e58e0d54fef10bae7ecf63f537723d17" \
+    django-native-postgres
+```
+
+The package metadata requires the fork's exact generated Django version. A
+plain installation without the fork therefore fails instead of silently using
+an incompatible upstream Django release. See
 [Django fork requirement](docs/django-fork.md) for details.
 
 Requirements:

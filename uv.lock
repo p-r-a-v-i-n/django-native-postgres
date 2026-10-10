@@ -23,7 +23,7 @@ wheels = [
 [[package]]
 name = "django"
 version = "6.2.dev20261009125329"
-source = { git = "https://github.com/p-r-a-v-i-n/django.git?branch=feature%2Fnative-async-backend-contract#312860d0e58e0d54fef10bae7ecf63f537723d17" }
+source = { git = "https://github.com/p-r-a-v-i-n/django.git?rev=312860d0e58e0d54fef10bae7ecf63f537723d17#312860d0e58e0d54fef10bae7ecf63f537723d17" }
 dependencies = [
     { name = "asgiref" },
     { name = "sqlparse" },
@@ -50,7 +50,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "django", git = "https://github.com/p-r-a-v-i-n/django.git?branch=feature%2Fnative-async-backend-contract" },
+    { name = "django", git = "https://github.com/p-r-a-v-i-n/django.git?rev=312860d0e58e0d54fef10bae7ecf63f537723d17" },
     { name = "psycopg", specifier = ">=3.1.12" },
 ]
 

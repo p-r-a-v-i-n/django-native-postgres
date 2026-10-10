@@ -30,24 +30,51 @@ The fork also provides the async transaction boundary used by
 `transaction.atomic()`. Backends that do not opt in keep their existing
 synchronous behavior.
 
-## Development dependency
+## Tested fork revision
 
-This repository currently selects the fork through `uv`:
+Each backend release is tied to one tested Django fork revision. The current
+revision is:
+
+```text
+Repository: https://github.com/p-r-a-v-i-n/django
+Commit:     312860d0e58e0d54fef10bae7ecf63f537723d17
+Version:    6.2.dev20261009125329
+```
+
+Install the fork and backend together:
+
+```console
+python -m pip install \
+    "Django @ git+https://github.com/p-r-a-v-i-n/django.git@312860d0e58e0d54fef10bae7ecf63f537723d17" \
+    django-native-postgres
+```
+
+The backend's published metadata requires
+`Django==6.2.dev20261009125329`. Upstream PyPI does not provide that tested
+fork distribution, so installing the backend without supplying the fork fails
+dependency resolution rather than silently installing incompatible Django
+code.
+
+This repository selects the same exact revision through `uv`:
 
 ```toml
 [tool.uv.sources.django]
 git = "https://github.com/p-r-a-v-i-n/django.git"
-branch = "feature/native-async-backend-contract"
+rev = "312860d0e58e0d54fef10bae7ecf63f537723d17"
 ```
 
-This source override is for this repository's development environment. It is
-not a portable transitive dependency for applications installing the package
-with `pip`.
+The exact commit is also recorded in `uv.lock`. CI, development, wheel smoke
+tests, and application installation therefore use the same Django code.
 
-Before the first package release, the Django dependency must be pinned to an
-exact tested commit and the installation guide must explain how applications
-install that fork. A mutable branch is not sufficient for a reproducible
-release.
+PyPI packages cannot safely embed a mutable Git dependency, and public package
+indexes are expected to reject direct URL dependencies in uploaded metadata.
+The Git reference is therefore an explicit application installation input,
+while the backend publishes a normal exact-version requirement.
+
+The backend also validates the async compiler, cursor, and transaction
+contract when Django loads it. Bypassing dependency resolution with an
+incompatible Django installation raises `ImproperlyConfigured` instead of
+silently returning to synchronous database I/O.
 
 ## Why the backend does not patch Django at runtime
 

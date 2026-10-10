@@ -34,9 +34,7 @@ evaluated. Those related queries also use the native async backend:
 ```python
 articles = [
     article
-    async for article in Article.objects.order_by("title").prefetch_related(
-        "tags"
-    )
+    async for article in Article.objects.order_by("title").prefetch_related("tags")
 ]
 
 for article in articles:
