@@ -12,9 +12,9 @@ development branch. It is not yet a stable support policy.
 | Django | Project fork based on Django development code |
 | PostgreSQL | Integration tests default to PostgreSQL 18 |
 
-Python classifiers currently include Python 3.12, 3.13, and 3.14. A release
-must not claim an operating-system or PostgreSQL version matrix until CI builds
-and tests that matrix.
+Python classifiers and the PostgreSQL integration-test matrix currently include
+Python 3.12, 3.13, 3.14, and 3.15. A release must not claim an operating-system
+or PostgreSQL version matrix until CI builds and tests that matrix.
 
 ## Tested native async ORM behavior
 

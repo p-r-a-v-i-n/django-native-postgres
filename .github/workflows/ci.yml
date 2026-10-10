@@ -14,12 +14,12 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  UV_VERSION: "0.9.26"
+  UV_VERSION: "0.13.0"
 
 jobs:
   quality:
     name: Formatting, linting, and Rust tests
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 20
 
     steps:
@@ -65,12 +65,12 @@ jobs:
 
   postgres:
     name: PostgreSQL tests on Python ${{ matrix.python-version }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13", "3.14"]
+        python-version: ["3.12", "3.13", "3.14", "3.15"]
 
     services:
       postgres:
@@ -88,6 +88,11 @@ jobs:
           --health-retries 30
 
     env:
+      DNP_POSTGRES_DB: django_native_postgres_tests
+      DNP_POSTGRES_HOST: 127.0.0.1
+      DNP_POSTGRES_PASSWORD: django_native
+      DNP_POSTGRES_PORT: "5432"
+      DNP_POSTGRES_USER: django_native
       DJANGO_NATIVE_POSTGRES_TEST_DATABASE_URL: >-
         postgresql://django_native:django_native@127.0.0.1:5432/django_native_postgres_tests
 

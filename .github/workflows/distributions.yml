@@ -33,7 +33,7 @@ concurrency:
 
 env:
   MATURIN_VERSION: "v1.15.0"
-  UV_VERSION: "0.9.26"
+  UV_VERSION: "0.13.0"
 
 jobs:
   wheels:
@@ -45,7 +45,7 @@ jobs:
       matrix:
         platform:
           - name: manylinux x86-64
-            runner: ubuntu-24.04
+            runner: ubuntu-latest
             target: x86_64
             manylinux: "2_17"
             artifact: manylinux-x86_64
@@ -126,7 +126,7 @@ jobs:
 
   sdist:
     name: Source distribution
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 15
 
     steps:
