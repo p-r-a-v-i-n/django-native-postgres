@@ -18,5 +18,39 @@
   "semanticCommits": "enabled",
   "osvVulnerabilityAlerts": true,
   "prConcurrentLimit": 5,
-  "prHourlyLimit": 2
+  "prHourlyLimit": 2,
+  "packageRules": [
+    {
+      "description": "Keep the supported Python floor a deliberate decision",
+      "matchManagers": ["pep621"],
+      "matchDepTypes": ["requires-python"],
+      "enabled": false
+    },
+    {
+      "description": "Group Python build and development tooling",
+      "matchManagers": ["pep621"],
+      "matchDepTypes": ["build-system.requires", "dependency-groups"],
+      "groupName": "Python tooling"
+    },
+    {
+      "description": "Keep the tested Django fork revision a deliberate decision",
+      "matchPackageNames": ["django"],
+      "enabled": false
+    },
+    {
+      "description": "Wait briefly before adopting new PyPI releases",
+      "matchDatasources": ["pypi"],
+      "minimumReleaseAge": "3 days"
+    },
+    {
+      "description": "Group GitHub Actions updates",
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions"
+    },
+    {
+      "description": "Require approval for major updates",
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    }
+  ]
 }
