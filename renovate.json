@@ -120,7 +120,8 @@
       "description": "Track the Rust version used by GitHub Actions",
       "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
       "matchStrings": [
-        "toolchain: \\\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\\\""
+        "toolchain: \\\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\\\"",
+        "RUST_VERSION: \\\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\\\""
       ],
       "depNameTemplate": "rust",
       "depTypeTemplate": "rust-version",
