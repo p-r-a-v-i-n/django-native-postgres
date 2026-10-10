@@ -91,7 +91,7 @@ an incompatible upstream Django release. See
 Requirements:
 
 - Python 3.12 or newer;
-- Rust 1.98 or newer;
+- Rust 1.99 or newer;
 - `uv`;
 - `just`; and
 - Docker or another Docker-compatible container runtime for PostgreSQL

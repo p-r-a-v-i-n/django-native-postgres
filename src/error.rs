@@ -107,10 +107,10 @@ impl std::fmt::Display for NativeError {
                 write!(formatter, "PostgreSQL transaction start was cancelled")
             }
             Self::PostgresTransaction { operation, source } => {
-                write! {
+                write!(
                     formatter,
                     "failed to {operation} PostgreSQL transaction: {source}"
-                }
+                )
             }
             Self::TransactionHandleClosed => {
                 write!(formatter, "PostgreSQL transaction handle is closed")
