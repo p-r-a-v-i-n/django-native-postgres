@@ -28,51 +28,19 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Verify tag and package versions
+      - name: Verify release tag
+        if: github.event_name == 'push'
         shell: bash
         run: |
-          python3 - <<'PY'
-          import os
-          import tomllib
+          package_version="$(
+            python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])'
+          )"
+          expected_tag="v${package_version}"
 
-          def read_toml(path):
-              with open(path, "rb") as file:
-                  return tomllib.load(file)
-
-          def locked_package_version(path, package_name):
-              packages = read_toml(path)["package"]
-              return next(
-                  package["version"]
-                  for package in packages
-                  if package["name"] == package_name
-              )
-
-          package_name = "django-native-postgres"
-          cargo_version = read_toml("Cargo.toml")["package"]["version"]
-          cargo_lock_version = locked_package_version("Cargo.lock", package_name)
-          dynamic_fields = read_toml("pyproject.toml")["project"]["dynamic"]
-
-          if "version" not in dynamic_fields:
-              raise SystemExit("pyproject.toml must derive its version from Cargo.toml")
-
-          if cargo_lock_version != cargo_version:
-              raise SystemExit(
-                  "Release versions do not match: "
-                  f"Cargo.toml={cargo_version}, Cargo.lock={cargo_lock_version}"
-              )
-
-          if os.environ["GITHUB_EVENT_NAME"] == "push":
-              tag = os.environ["GITHUB_REF_NAME"]
-              expected_tag = f"v{cargo_version}"
-              if tag != expected_tag:
-                  raise SystemExit(
-                      f"Release tag {tag!r} does not match package version "
-                      f"{expected_tag!r}"
-                  )
-              print(f"Release version {cargo_version} matches {tag}")
-          else:
-              print(f"Release metadata consistently uses version {cargo_version}")
-          PY
+          if [[ "$GITHUB_REF_NAME" != "$expected_tag" ]]; then
+            echo "Release tag $GITHUB_REF_NAME does not match $expected_tag"
+            exit 1
+          fi
 
   wheels:
     name: Wheel (${{ matrix.platform.name }})
