@@ -6,7 +6,7 @@ This guide describes the local development workflow for
 ## Requirements
 
 - Python 3.12 or newer
-- Rust 1.98 or newer
+- Rust 1.99 or newer
 - `uv`
 - `just`
 - Docker or another Docker-compatible container runtime, only for the
