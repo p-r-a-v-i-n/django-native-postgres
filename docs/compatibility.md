@@ -8,7 +8,7 @@ development branch. It is not yet a stable support policy.
 | Component | Current project requirement |
 | --- | --- |
 | Python | 3.12 or newer |
-| Rust | 1.85 or newer |
+| Rust | 1.98 or newer |
 | Django | Project fork based on Django development code |
 | PostgreSQL | Integration tests default to PostgreSQL 18 |
 
