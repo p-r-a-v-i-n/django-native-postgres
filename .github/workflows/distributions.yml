@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/distributions.yml
+      - CHANGELOG.md
       - Cargo.lock
       - Cargo.toml
       - README.md
@@ -16,6 +17,7 @@ on:
     branches: [main]
     paths:
       - .github/workflows/distributions.yml
+      - CHANGELOG.md
       - Cargo.lock
       - Cargo.toml
       - README.md
@@ -204,6 +206,16 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: |
+            Cargo.lock
+            uv.lock
+
       - name: Build source distribution
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
@@ -211,6 +223,31 @@ jobs:
           maturin-version: ${{ env.MATURIN_VERSION }}
           rust-toolchain: ${{ env.RUST_VERSION }}
           args: --out dist
+
+      - name: Export the pinned runtime dependencies
+        run: >-
+          uv export --locked --no-dev --no-emit-project
+          --output-file sdist-requirements.txt
+
+      - name: Create source distribution test environment
+        run: uv venv --python 3.12 .sdist-venv
+
+      - name: Install the pinned runtime dependencies
+        run: >-
+          uv pip install --python .sdist-venv
+          --requirements sdist-requirements.txt
+
+      - name: Install the Psycopg binary implementation
+        run: uv pip install --python .sdist-venv "psycopg[binary]>=3.1.12"
+
+      - name: Install the built source distribution
+        run: >-
+          uv pip install --python .sdist-venv --no-deps dist/*.tar.gz
+
+      - name: Smoke-test the built source distribution
+        run: >-
+          uv run --no-project --python .sdist-venv
+          python -I tests/wheel_smoke.py
 
       - name: Upload source distribution
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

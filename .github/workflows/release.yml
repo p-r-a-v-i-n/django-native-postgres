@@ -4,6 +4,12 @@ on:
   pull_request:
     paths:
       - .github/workflows/release.yml
+      - CHANGELOG.md
+      - Cargo.lock
+      - Cargo.toml
+      - pyproject.toml
+      - tests/wheel_smoke.py
+      - uv.lock
   push:
     tags:
       - "v*"
@@ -22,6 +28,8 @@ jobs:
     name: Validate release version
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      version: ${{ steps.package-version.outputs.version }}
 
     steps:
       - name: Check out the repository
@@ -29,17 +37,44 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Verify release tag
-        if: github.event_name == 'push'
+      - name: Read package version
+        id: package-version
         shell: bash
         run: |
           package_version="$(
             python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])'
           )"
-          expected_tag="v${package_version}"
+          echo "version=$package_version" >> "$GITHUB_OUTPUT"
+
+      - name: Verify release tag
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          PACKAGE_VERSION: ${{ steps.package-version.outputs.version }}
+        run: |
+          expected_tag="v${PACKAGE_VERSION}"
 
           if [[ "$GITHUB_REF_NAME" != "$expected_tag" ]]; then
             echo "Release tag $GITHUB_REF_NAME does not match $expected_tag"
+            exit 1
+          fi
+
+          if ! grep -Eq "^## $PACKAGE_VERSION - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md; then
+            echo "CHANGELOG.md does not contain a dated $PACKAGE_VERSION release"
+            exit 1
+          fi
+
+      - name: Verify Cargo lock version
+        shell: bash
+        env:
+          PACKAGE_VERSION: ${{ steps.package-version.outputs.version }}
+        run: |
+          locked_version="$(
+            python3 -c 'import tomllib; packages = tomllib.load(open("Cargo.lock", "rb"))["package"]; print(next(package["version"] for package in packages if package["name"] == "django-native-postgres"))'
+          )"
+
+          if [[ "$locked_version" != "$PACKAGE_VERSION" ]]; then
+            echo "Cargo.lock version $locked_version does not match $PACKAGE_VERSION"
             exit 1
           fi
 
@@ -152,6 +187,16 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: |
+            Cargo.lock
+            uv.lock
+
       - name: Build source distribution
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
@@ -159,6 +204,31 @@ jobs:
           maturin-version: ${{ env.MATURIN_VERSION }}
           rust-toolchain: ${{ env.RUST_VERSION }}
           args: --out dist
+
+      - name: Export the pinned runtime dependencies
+        run: >-
+          uv export --locked --no-dev --no-emit-project
+          --output-file sdist-requirements.txt
+
+      - name: Create source distribution test environment
+        run: uv venv --python 3.12 .sdist-venv
+
+      - name: Install the pinned runtime dependencies
+        run: >-
+          uv pip install --python .sdist-venv
+          --requirements sdist-requirements.txt
+
+      - name: Install the Psycopg binary implementation
+        run: uv pip install --python .sdist-venv "psycopg[binary]>=3.1.12"
+
+      - name: Install the built source distribution
+        run: >-
+          uv pip install --python .sdist-venv --no-deps dist/*.tar.gz
+
+      - name: Smoke-test the built source distribution
+        run: >-
+          uv run --no-project --python .sdist-venv
+          python -I tests/wheel_smoke.py
 
       - name: Upload source distribution
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -195,9 +265,60 @@ jobs:
           packages-dir: dist/
           skip-existing: true
 
+  verify-testpypi:
+    name: Verify TestPyPI package
+    needs: [validate, publish-testpypi]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Export the pinned runtime dependencies
+        run: >-
+          uv export --locked --no-dev --no-emit-project
+          --output-file testpypi-requirements.txt
+
+      - name: Create package test environment
+        run: uv venv --python 3.12 .testpypi-venv
+
+      - name: Install the pinned runtime dependencies
+        run: >-
+          uv pip install --python .testpypi-venv
+          --requirements testpypi-requirements.txt
+
+      - name: Install the Psycopg binary implementation
+        run: >-
+          uv pip install --python .testpypi-venv "psycopg[binary]>=3.1.12"
+
+      - name: Install the package from TestPyPI
+        env:
+          PACKAGE_VERSION: ${{ needs.validate.outputs.version }}
+        run: >-
+          uv pip install --python .testpypi-venv --no-deps
+          --index-url https://test.pypi.org/simple/
+          "django-native-postgres==$PACKAGE_VERSION"
+
+      - name: Smoke-test the TestPyPI package
+        run: >-
+          uv run --no-project --python .testpypi-venv
+          python -I tests/wheel_smoke.py
+
   publish-pypi:
     name: Publish to PyPI
-    needs: publish-testpypi
+    needs: verify-testpypi
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 10

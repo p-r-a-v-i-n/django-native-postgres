@@ -26,6 +26,12 @@ dependencies = [
     "psycopg>=3.1.12",
 ]
 
+[project.urls]
+Changelog = "https://github.com/p-r-a-v-i-n/django-native-postgres/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/p-r-a-v-i-n/django-native-postgres/tree/main/docs"
+Issues = "https://github.com/p-r-a-v-i-n/django-native-postgres/issues"
+Repository = "https://github.com/p-r-a-v-i-n/django-native-postgres"
+
 [dependency-groups]
 dev = [
     "maturin>=1.9,<2.0",
