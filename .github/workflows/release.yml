@@ -1,0 +1,274 @@
+name: Release
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  MATURIN_VERSION: "v1.15.0"
+  UV_VERSION: "0.13.0"
+
+jobs:
+  validate:
+    name: Validate release version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify tag and package versions
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import tomllib
+
+          def read_toml(path):
+              with open(path, "rb") as file:
+                  return tomllib.load(file)
+
+          def locked_package_version(path, package_name):
+              packages = read_toml(path)["package"]
+              return next(
+                  package["version"]
+                  for package in packages
+                  if package["name"] == package_name
+              )
+
+          package_name = "django-native-postgres"
+          cargo_version = read_toml("Cargo.toml")["package"]["version"]
+          cargo_lock_version = locked_package_version("Cargo.lock", package_name)
+          dynamic_fields = read_toml("pyproject.toml")["project"]["dynamic"]
+
+          if "version" not in dynamic_fields:
+              raise SystemExit("pyproject.toml must derive its version from Cargo.toml")
+
+          if cargo_lock_version != cargo_version:
+              raise SystemExit(
+                  "Release versions do not match: "
+                  f"Cargo.toml={cargo_version}, Cargo.lock={cargo_lock_version}"
+              )
+
+          if os.environ["GITHUB_EVENT_NAME"] == "push":
+              tag = os.environ["GITHUB_REF_NAME"]
+              expected_tag = f"v{cargo_version}"
+              if tag != expected_tag:
+                  raise SystemExit(
+                      f"Release tag {tag!r} does not match package version "
+                      f"{expected_tag!r}"
+                  )
+              print(f"Release version {cargo_version} matches {tag}")
+          else:
+              print(f"Release metadata consistently uses version {cargo_version}")
+          PY
+
+  wheels:
+    name: Wheel (${{ matrix.platform.name }})
+    needs: validate
+    if: github.event_name != 'pull_request'
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: manylinux x86-64
+            runner: ubuntu-latest
+            target: x86_64
+            manylinux: "2_17"
+            artifact: manylinux-x86-64
+          - name: manylinux ARM64
+            runner: ubuntu-24.04-arm
+            target: aarch64
+            manylinux: "2_17"
+            artifact: manylinux-aarch64
+          - name: macOS Intel
+            runner: macos-15-intel
+            target: x86_64
+            manylinux: "off"
+            artifact: macos-x86-64
+          - name: macOS Apple Silicon
+            runner: macos-15
+            target: aarch64
+            manylinux: "off"
+            artifact: macos-aarch64
+          - name: Windows x86-64
+            runner: windows-2025
+            target: x64
+            manylinux: "off"
+            artifact: windows-x86-64
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: |
+            Cargo.lock
+            uv.lock
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: build
+          maturin-version: ${{ env.MATURIN_VERSION }}
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux }}
+          args: --release --locked --compatibility pypi --out dist
+
+      - name: Export the pinned runtime dependencies
+        run: >-
+          uv export --locked --no-dev --no-emit-project
+          --output-file wheel-requirements.txt
+
+      - name: Create wheel test environment
+        run: uv venv --python 3.12 .wheel-venv
+
+      - name: Install the pinned runtime dependencies
+        run: >-
+          uv pip install --python .wheel-venv
+          --requirements wheel-requirements.txt
+
+      - name: Install the Psycopg binary implementation
+        run: uv pip install --python .wheel-venv "psycopg[binary]>=3.1.12"
+
+      - name: Install the built wheel
+        run: >-
+          uv pip install --python .wheel-venv --no-deps --no-index
+          --find-links dist django-native-postgres
+
+      - name: Smoke-test the built wheel
+        run: >-
+          uv run --no-project --python .wheel-venv
+          python -I tests/wheel_smoke.py
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-wheel-${{ matrix.platform.artifact }}
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 7
+
+  sdist:
+    name: Source distribution
+    needs: validate
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build source distribution
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: sdist
+          maturin-version: ${{ env.MATURIN_VERSION }}
+          args: --out dist
+
+      - name: Upload source distribution
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    needs: [wheels, sdist]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/django-native-postgres
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist/
+          skip-existing: true
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: publish-testpypi
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/django-native-postgres
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist/
+
+  github-release:
+    name: Create GitHub release
+    needs: publish-pypi
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          generate_release_notes: true
+          files: dist/*
+          fail_on_unmatched_files: true

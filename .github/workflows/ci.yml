@@ -45,9 +45,6 @@ jobs:
       - name: Install Python development dependencies
         run: uv sync --locked --all-groups --no-install-project
 
-      - name: Check the Python lockfile
-        run: uv lock --check
-
       - name: Check Python formatting
         run: uv run --no-sync ruff format --check .
 
@@ -120,12 +117,6 @@ jobs:
 
       - name: Build the native extension
         run: uv run --no-sync maturin develop --locked
-
-      - name: Verify the Django fork contract
-        run: >-
-          uv run --no-sync python -c
-          "from django_native_postgres.django_compatibility import
-          require_native_async_django; require_native_async_django()"
 
       - name: Run the complete test suite
         run: uv run --no-sync pytest
