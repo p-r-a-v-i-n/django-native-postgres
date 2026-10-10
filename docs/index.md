@@ -16,6 +16,8 @@ the native async execution path, pool, and PostgreSQL connections.
 - [Database errors and diagnostics](database-errors.md) documents Django
   exception mapping, native PostgreSQL diagnostics, and retry boundaries.
 - [Development](development.md) explains how to build and test the project.
+- [Releasing](releasing.md) defines artifact validation, Trusted Publishing,
+  and the production release checklist.
 - [Django fork requirement](django-fork.md) explains why upstream Django
   cannot currently use the native execution path.
 - [Compatibility](compatibility.md) lists what is tested and what is not yet
@@ -38,8 +40,7 @@ The following guides will be added as the documentation work continues:
 
 - installation from a published package;
 - operational behavior and security;
-- contributing and testing against the Django fork; and
-- packaging and release procedures.
+- contributing and testing against the Django fork.
 
 ## Release status
 
