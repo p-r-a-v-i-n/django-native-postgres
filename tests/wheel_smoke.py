@@ -1,4 +1,5 @@
-from importlib.metadata import requires, version as distribution_version
+from importlib.metadata import requires
+from importlib.metadata import version as distribution_version
 
 from django.db.backends.base.features import BaseDatabaseFeatures
 from django_native_postgres import build_info
