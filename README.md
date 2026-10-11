@@ -173,6 +173,11 @@ Start with the [documentation index](docs/index.md). Important references are:
 - [Supported PostgreSQL values](docs/supported-types.md)
 - [Compatibility and limitations](docs/compatibility.md)
 
+## Contributing
+
+See [Contributing docs](CONTRIBUTING.md) before submitting a change. Contributions
+using AI assistance must follow the [AI policy](AI_POLICY.md).
+
 ## License
 
 Licensed under the BSD 3-Clause License. See [LICENSE](LICENSE).
