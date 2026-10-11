@@ -18,6 +18,7 @@ mod parameter;
 mod placeholders;
 mod pool;
 mod postgres;
+mod query_stream;
 mod runtime;
 mod transaction;
 mod transaction_options;
@@ -192,6 +193,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     module.add_class::<pool::PoolHandle>()?;
     module.add_class::<transaction::TransactionHandle>()?;
+    module.add_class::<query_stream::QueryStreamHandle>()?;
 
     module.add_function(wrap_pyfunction!(build_info, module)?)?;
     module.add_function(wrap_pyfunction!(runtime_probe, module)?)?;

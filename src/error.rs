@@ -28,6 +28,9 @@ pub(crate) enum NativeError {
     TransactionStartCancelled,
     TransactionHandleClosed,
     TransactionHandleProcessMismatch,
+    QueryStreamHandleClosed,
+    QueryStreamHandleProcessMismatch,
+    InvalidQueryStreamFetchSize,
     QueryCancelled {
         connection_can_be_reused: bool,
     },
@@ -120,6 +123,18 @@ impl std::fmt::Display for NativeError {
                     formatter,
                     "PostgreSQL transaction handle belongs to a different process"
                 )
+            }
+            Self::QueryStreamHandleClosed => {
+                write!(formatter, "PostgreSQL queryStream handle is closed")
+            }
+            Self::QueryStreamHandleProcessMismatch => {
+                write!(
+                    formatter,
+                    "PostgreSQL queryStream handle belongs to a different process"
+                )
+            }
+            Self::InvalidQueryStreamFetchSize => {
+                write!(formatter, "Invalid size")
             }
             Self::QueryCancelled { .. } => {
                 write!(formatter, "PostgreSQL query was cancelled")

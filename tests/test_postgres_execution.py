@@ -1988,3 +1988,17 @@ def test_pool_is_recreated_after_fork(postgres_database_url):
         receiver.close()
         sender.close()
         asyncio.run(_native.close_pools())
+
+
+@pytest.mark.asyncio
+async def test_query_stream_fetches_rows(postgres_pool):
+    stream, rows_affected, columns = await _native.open_query_stream(
+        pool=postgres_pool,
+        sql="""SELECT value::BIGINT
+        FROM generate_series(1, 5) AS value
+        ORDER BY value
+        """,
+    )
+
+    assert rows_affected is None
+    assert columns == ["value"]
