@@ -72,3 +72,13 @@ async def execute_with_metadata(
     sql: str,
     params: QueryParameters | None = None,
 ) -> tuple[list[list[str | int | None]], int, list[str]]: ...
+async def open_query_stream(
+    pool: PoolHandle,
+    sql: str,
+    params: QueryParameters | None = None,
+) -> tuple[QueryStreamHandle, int | None, list[str]]: ...
+async def fetch_query_stream(
+    stream: QueryStreamHandle,
+    size: int,
+) -> list[list[str | int | None]]: ...
+async def close_query_stream(stream: QueryStreamHandle) -> None: ...

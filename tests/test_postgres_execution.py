@@ -2002,3 +2002,43 @@ async def test_query_stream_fetches_rows(postgres_pool):
 
     assert rows_affected is None
     assert columns == ["value"]
+    assert await _native.fetch_query_stream(stream, 2) == [[1], [2]]
+    assert await _native.fetch_query_stream(stream, 2) == [[3], [4]]
+    assert await _native.fetch_query_stream(stream, 2) == [[5]]
+    assert await _native.fetch_query_stream(stream, 2) == []
+
+
+@pytest.mark.asyncio
+async def test_query_stream_reports_affected_rows_for_non_row_query(postgres_pool):
+    await _native.execute(
+        pool=postgres_pool,
+        sql="CREATE TEMPORARY TABLE native_query_stream_update (value BIGINT)",
+    )
+    await _native.execute(
+        pool=postgres_pool,
+        sql="INSERT INTO native_query_stream_update VALUES (1), (2)",
+    )
+
+    stream, rows_affected, columns = await _native.open_query_stream(
+        pool=postgres_pool,
+        sql="UPDATE native_query_stream_update SET value = value + 1",
+    )
+
+    assert rows_affected == 2
+    assert columns == []
+    assert await _native.fetch_query_stream(stream, 1) == []
+
+
+@pytest.mark.asyncio
+async def test_query_stream_reuses_connection_after_single_row(postgres_pool):
+    backend_pid = await _get_backend_pid(postgres_pool)
+    stream, _, _ = await _native.open_query_stream(
+        pool=postgres_pool,
+        sql="SELECT pg_backend_pid()::BIGINT",
+    )
+
+    assert await _native.fetch_query_stream(stream, 1) == [[backend_pid]]
+    await _native.close_query_stream(stream)
+
+    current_backend_pid = await _get_backend_pid(postgres_pool)
+    assert current_backend_pid == backend_pid

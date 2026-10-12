@@ -125,16 +125,19 @@ impl std::fmt::Display for NativeError {
                 )
             }
             Self::QueryStreamHandleClosed => {
-                write!(formatter, "PostgreSQL queryStream handle is closed")
+                write!(formatter, "PostgreSQL query stream handle is closed")
             }
             Self::QueryStreamHandleProcessMismatch => {
                 write!(
                     formatter,
-                    "PostgreSQL queryStream handle belongs to a different process"
+                    "PostgreSQL query stream handle belongs to a different process"
                 )
             }
             Self::InvalidQueryStreamFetchSize => {
-                write!(formatter, "Invalid size")
+                write!(
+                    formatter,
+                    "query stream fetch size must be greater than zero"
+                )
             }
             Self::QueryCancelled { .. } => {
                 write!(formatter, "PostgreSQL query was cancelled")

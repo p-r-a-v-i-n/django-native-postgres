@@ -9,6 +9,7 @@ use crate::error::NativeError;
 use crate::parameter::QueryParameters;
 use crate::pool::PoolHandle;
 use crate::postgres::{self, QueryResult};
+use crate::query_stream::{self, QueryStreamOpenResult};
 use crate::transaction::{self, TransactionHandle};
 use crate::transaction_options::TransactionOptions;
 use deadpool_postgres::Pool;
@@ -40,6 +41,13 @@ enum Command {
     ClosePool {
         pool_id: u64,
         response: oneshot::Sender<()>,
+    },
+    OpenQueryStream {
+        pool: PoolHandle,
+        sql: String,
+        params: QueryParameters,
+        cancellation: oneshot::Receiver<()>,
+        response: oneshot::Sender<Result<QueryStreamOpenResult, NativeError>>,
     },
 }
 
@@ -235,6 +243,33 @@ async fn get_or_create_pool(
     Ok(pool)
 }
 
+pub(crate) async fn open_query_stream(
+    pool: PoolHandle,
+    sql: String,
+    params: QueryParameters,
+) -> Result<QueryStreamOpenResult, NativeError> {
+    let (mut cancellation_guard, cancellation) = CancellationGuard::new();
+    let service = RuntimeService::start();
+    let (response_tx, response_rx) = oneshot::channel();
+
+    service
+        .sender
+        .send(Command::OpenQueryStream {
+            pool,
+            sql,
+            params,
+            cancellation,
+            response: response_tx,
+        })
+        .await
+        .map_err(|_| NativeError::CommandChannelClosed)?;
+
+    let response = response_rx.await;
+    cancellation_guard.disarm();
+
+    response.map_err(|_| NativeError::ResponseChannelClosed)?
+}
+
 async fn handle_command(command: Command, pools: PoolRegistry) {
     match command {
         Command::Probe { delay_ms, response } => {
@@ -283,6 +318,20 @@ async fn handle_command(command: Command, pools: PoolRegistry) {
                 pool.close();
             }
             let _ = response.send(());
+        }
+        Command::OpenQueryStream {
+            pool,
+            sql,
+            params,
+            cancellation,
+            response,
+        } => {
+            let result = match get_or_create_pool(&pools, &pool).await {
+                Ok(pool) => query_stream::open(&pool, sql, params, cancellation).await,
+                Err(error) => Err(error),
+            };
+
+            let _ = response.send(result);
         }
     }
 }
