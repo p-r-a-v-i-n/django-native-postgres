@@ -5,7 +5,7 @@ use futures_util::TryStreamExt;
 use pyo3::prelude::*;
 use std::time::Duration;
 use tokio::sync::oneshot;
-use tokio_postgres::error::Severity;
+use tokio_postgres::error::{Severity, SqlState};
 use tokio_postgres::types::{ToSql, Type};
 use tokio_postgres::{CancelToken, GenericClient, NoTls};
 
@@ -27,11 +27,54 @@ pub(crate) struct QueryResult {
     pub(crate) columns: QueryColumns,
 }
 
-fn query_error_allows_connection_reuse(error: &tokio_postgres::Error) -> bool {
+pub(crate) fn decode_row(row: tokio_postgres::Row) -> Result<Vec<Option<QueryValue>>, NativeError> {
+    let mut decoded_row = Vec::with_capacity(row.len());
+
+    for column in 0..row.len() {
+        let column_type = row.columns()[column].type_();
+
+        let value = if column_type == &Type::TEXT
+            || column_type == &Type::VARCHAR
+            || column_type == &Type::BPCHAR
+            || column_type == &Type::NAME
+        {
+            row.try_get::<usize, Option<String>>(column)
+                .map(|value| value.map(QueryValue::Text))
+                .map_err(|source| NativeError::PostgresDecode { column, source })?
+        } else if column_type == &Type::INT2 {
+            row.try_get::<usize, Option<i16>>(column)
+                .map(|value| value.map(|value| QueryValue::Integer(i64::from(value))))
+                .map_err(|source| NativeError::PostgresDecode { column, source })?
+        } else if column_type == &Type::INT4 {
+            row.try_get::<usize, Option<i32>>(column)
+                .map(|value| value.map(|value| QueryValue::Integer(i64::from(value))))
+                .map_err(|source| NativeError::PostgresDecode { column, source })?
+        } else if column_type == &Type::INT8 {
+            row.try_get::<usize, Option<i64>>(column)
+                .map(|value| value.map(QueryValue::Integer))
+                .map_err(|source| NativeError::PostgresDecode { column, source })?
+        } else {
+            return Err(NativeError::UnsupportedPostgresType {
+                column,
+                type_name: column_type.name().to_string(),
+            });
+        };
+
+        decoded_row.push(value);
+    }
+
+    Ok(decoded_row)
+}
+
+pub(crate) fn query_error_allows_connection_reuse(error: &tokio_postgres::Error) -> bool {
     error
         .as_db_error()
         .and_then(|error| error.parsed_severity())
         == Some(Severity::Error)
+}
+
+pub(crate) fn query_error_confirms_cancellation(error: &tokio_postgres::Error) -> bool {
+    error.code() == Some(&SqlState::QUERY_CANCELED)
 }
 
 pub(crate) fn create_pool(
@@ -92,19 +135,20 @@ where
                 .map_err(NativeError::PostgresCancel)?;
 
             // PostgreSQL sends the cancellation result through the original
-            // connection. Drain it before that connection can be reused.
+            // connection. Reuse it only when that result confirms the
+            // cancellation reached this query rather than a later query.
             let connection_can_be_reused = match query.await {
                 Ok(rows) => {
                     tokio::pin!(rows);
                     loop {
                         match rows.try_next().await {
                             Ok(Some(_)) => continue,
-                            Ok(None) => break true,
-                            Err(error) => break query_error_allows_connection_reuse(&error),
+                            Ok(None) => break false,
+                            Err(error) => break query_error_confirms_cancellation(&error),
                         }
                     }
                 }
-                Err(error) => query_error_allows_connection_reuse(&error),
+                Err(error) => query_error_confirms_cancellation(&error),
             };
             return Err(NativeError::QueryCancelled {
                 connection_can_be_reused,
@@ -113,7 +157,9 @@ where
     };
 
     tokio::pin!(rows);
-    let mut postgres_rows = Vec::new();
+    let mut decoded_rows = Vec::new();
+    let mut columns = None;
+    let mut decode_error = None;
 
     loop {
         let row = tokio::select! {
@@ -130,8 +176,8 @@ where
                 let connection_can_be_reused = loop {
                     match rows.try_next().await {
                         Ok(Some(_)) => continue,
-                        Ok(None) => break true,
-                        Err(error) => break query_error_allows_connection_reuse(&error),
+                        Ok(None) => break false,
+                        Err(error) => break query_error_confirms_cancellation(&error),
                     }
                 };
                 return Err(NativeError::QueryCancelled {
@@ -141,67 +187,39 @@ where
         };
 
         match row {
-            Some(row) => postgres_rows.push(row),
+            Some(row) => {
+                if columns.is_none() {
+                    columns = Some(
+                        row.columns()
+                            .iter()
+                            .map(|column| column.name().to_string())
+                            .collect(),
+                    );
+                }
+
+                if decode_error.is_none() {
+                    match decode_row(row) {
+                        Ok(row) => decoded_rows.push(row),
+                        Err(error) => {
+                            decoded_rows.clear();
+                            decode_error = Some(error);
+                        }
+                    }
+                }
+            }
             None => break,
         }
     }
 
     let rows_affected = rows.rows_affected().unwrap_or(0);
-    let columns = postgres_rows
-        .first()
-        .map(|row| {
-            row.columns()
-                .iter()
-                .map(|column| column.name().to_string())
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let mut decoded_rows = Vec::with_capacity(postgres_rows.len());
-
-    for row in postgres_rows {
-        let mut decoded_row = Vec::with_capacity(row.len());
-
-        for column in 0..row.len() {
-            let column_type = row.columns()[column].type_();
-
-            let value = if column_type == &Type::TEXT
-                || column_type == &Type::VARCHAR
-                || column_type == &Type::BPCHAR
-                || column_type == &Type::NAME
-            {
-                row.try_get::<usize, Option<String>>(column)
-                    .map(|value| value.map(QueryValue::Text))
-                    .map_err(|source| NativeError::PostgresDecode { column, source })?
-            } else if column_type == &Type::INT2 {
-                row.try_get::<usize, Option<i16>>(column)
-                    .map(|value| value.map(|value| QueryValue::Integer(i64::from(value))))
-                    .map_err(|source| NativeError::PostgresDecode { column, source })?
-            } else if column_type == &Type::INT4 {
-                row.try_get::<usize, Option<i32>>(column)
-                    .map(|value| value.map(|value| QueryValue::Integer(i64::from(value))))
-                    .map_err(|source| NativeError::PostgresDecode { column, source })?
-            } else if column_type == &Type::INT8 {
-                row.try_get::<usize, Option<i64>>(column)
-                    .map(|value| value.map(QueryValue::Integer))
-                    .map_err(|source| NativeError::PostgresDecode { column, source })?
-            } else {
-                return Err(NativeError::UnsupportedPostgresType {
-                    column,
-                    type_name: column_type.name().to_string(),
-                });
-            };
-
-            decoded_row.push(value);
-        }
-
-        decoded_rows.push(decoded_row);
+    if let Some(error) = decode_error {
+        return Err(error);
     }
 
     Ok(QueryResult {
         rows: decoded_rows,
         rows_affected,
-        columns,
+        columns: columns.unwrap_or_default(),
     })
 }
 
