@@ -19,6 +19,7 @@ from django_native_postgres.base import DatabaseWrapper
 from django_native_postgres.cursor import NativeAsyncCursor
 from django_native_postgres.executor import (
     NativeExecutor,
+    NativeQueryStream,
     _django_database_error_class,
     _translate_database_error,
 )
@@ -280,10 +281,38 @@ async def test_aexecute_with_metadata_forwards_query_to_process_executor():
 
 
 @pytest.mark.asyncio
+async def test_aopen_query_stream_forwards_query_to_process_executor():
+    connection = connections["default"]
+    executor = mock.Mock()
+    stream = object()
+    executor.open_query_stream = mock.AsyncMock(return_value=stream)
+
+    with mock.patch.object(
+        connection,
+        "get_async_executor",
+        return_value=executor,
+        create=True,
+    ):
+        result = await connection.aopen_query_stream("SELECT %s", (1,))
+
+    assert result is stream
+    executor.open_query_stream.assert_awaited_once_with(
+        sql="SELECT %s",
+        params=(1,),
+    )
+    assert connection.connection is None
+
+
+@pytest.mark.asyncio
 async def test_async_cursor_executes_and_fetches_rows():
     connection = mock.Mock()
-    connection.aexecute_with_metadata = mock.AsyncMock(
-        return_value=([[1], [2]], 2, ["value"])
+    connection.aopen_query_stream = mock.AsyncMock(
+        return_value=NativeQueryStream(
+            handle=None,
+            rows=[[1], [2]],
+            rows_affected=2,
+            columns=["value"],
+        )
     )
     cursor = NativeAsyncCursor(connection)
 
@@ -299,14 +328,19 @@ async def test_async_cursor_executes_and_fetches_rows():
         assert await opened_cursor.afetchone() == [2]
         assert await opened_cursor.afetchone() is None
 
-    connection.aexecute_with_metadata.assert_awaited_once_with("SELECT %s", (1,))
+    connection.aopen_query_stream.assert_awaited_once_with("SELECT %s", (1,))
 
 
 @pytest.mark.asyncio
 async def test_async_cursor_fetches_remaining_rows():
     connection = mock.Mock()
-    connection.aexecute_with_metadata = mock.AsyncMock(
-        return_value=([[1], [2], [3]], 3, ["value"])
+    connection.aopen_query_stream = mock.AsyncMock(
+        return_value=NativeQueryStream(
+            handle=None,
+            rows=[[1], [2], [3]],
+            rows_affected=3,
+            columns=["value"],
+        )
     )
 
     async with NativeAsyncCursor(connection) as cursor:
@@ -320,8 +354,13 @@ async def test_async_cursor_fetches_remaining_rows():
 @pytest.mark.asyncio
 async def test_async_cursor_fetches_rows_in_chunks():
     connection = mock.Mock()
-    connection.aexecute_with_metadata = mock.AsyncMock(
-        return_value=([[1], [2], [3]], 3, ["value"])
+    connection.aopen_query_stream = mock.AsyncMock(
+        return_value=NativeQueryStream(
+            handle=None,
+            rows=[[1], [2], [3]],
+            rows_affected=3,
+            columns=["value"],
+        )
     )
 
     async with NativeAsyncCursor(connection) as cursor:
@@ -351,6 +390,21 @@ async def test_async_cursor_cannot_fetch_without_an_active_result():
 
     with pytest.raises(RuntimeError, match=message):
         await cursor.afetchone()
+
+
+@pytest.mark.asyncio
+async def test_async_cursor_closes_stream_on_context_exit():
+    stream = mock.Mock(rows_affected=None, columns=["value"])
+    stream.fetchmany = mock.AsyncMock(return_value=[[1]])
+    stream.close = mock.AsyncMock()
+    connection = mock.Mock()
+    connection.aopen_query_stream = mock.AsyncMock(return_value=stream)
+
+    async with NativeAsyncCursor(connection) as cursor:
+        await cursor.aexecute("SELECT value FROM example")
+        assert await cursor.afetchone() == [1]
+
+    stream.close.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -700,6 +754,91 @@ async def test_executor_routes_metadata_queries_through_active_transaction():
         sql="SELECT 'pool' AS source",
         params=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_executor_opens_native_query_stream_outside_transaction():
+    pool = object()
+    handle = object()
+
+    with (
+        mock.patch(
+            "django_native_postgres.executor._native.create_pool",
+            return_value=pool,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.open_query_stream",
+            new=mock.AsyncMock(return_value=(handle, None, ["value"])),
+        ) as open_query_stream,
+        mock.patch(
+            "django_native_postgres.executor._native.fetch_query_stream",
+            new=mock.AsyncMock(return_value=[[1], [2]]),
+        ) as fetch_query_stream,
+        mock.patch(
+            "django_native_postgres.executor._native.close_query_stream",
+            new=mock.AsyncMock(),
+        ) as close_query_stream,
+    ):
+        executor = NativeExecutor(database_url="postgresql://example")
+        stream = await executor.open_query_stream("SELECT %s", (1,))
+
+        assert stream.rows_affected is None
+        assert stream.columns == ["value"]
+        assert await stream.fetchmany(2) == [[1], [2]]
+        await stream.close()
+
+    open_query_stream.assert_awaited_once_with(
+        pool=pool,
+        sql="SELECT %s",
+        params=(1,),
+    )
+    fetch_query_stream.assert_awaited_once_with(handle, 2)
+    close_query_stream.assert_awaited_once_with(handle)
+
+
+@pytest.mark.asyncio
+async def test_executor_keeps_query_stream_on_active_transaction():
+    pool = object()
+    handle = object()
+    transaction_result = ([[1], [2], [3]], 3, ["value"])
+
+    with (
+        mock.patch(
+            "django_native_postgres.executor._native.create_pool",
+            return_value=pool,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.begin_transaction",
+            new=mock.AsyncMock(return_value=handle),
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.execute_transaction_with_metadata",
+            new=mock.AsyncMock(return_value=transaction_result),
+        ) as execute_transaction_with_metadata,
+        mock.patch(
+            "django_native_postgres.executor._native.open_query_stream",
+            new=mock.AsyncMock(),
+        ) as open_query_stream,
+        mock.patch(
+            "django_native_postgres.executor._native.commit_transaction",
+            new=mock.AsyncMock(),
+        ),
+    ):
+        executor = NativeExecutor(database_url="postgresql://example")
+
+        async with executor.transaction():
+            stream = await executor.open_query_stream("SELECT value FROM example")
+            first_batch = await stream.fetchmany(2)
+            second_batch = await stream.fetchmany(2)
+
+    assert first_batch == [[1], [2]]
+    assert second_batch == [[3]]
+    execute_transaction_with_metadata.assert_awaited_once_with(
+        transaction=handle,
+        sql="SELECT value FROM example",
+        params=None,
+    )
+    open_query_stream.assert_not_awaited()
 
 
 @pytest.mark.asyncio
