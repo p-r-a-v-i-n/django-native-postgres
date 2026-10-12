@@ -92,6 +92,52 @@ async def _translate_database_error[T](operation: Awaitable[T]) -> T:
         raise ProgrammingError(str(error)) from error
 
 
+class NativeQueryStream:
+    def __init__(
+        self,
+        *,
+        handle: _native.QueryStreamHandle | None,
+        rows: list[list[str | int | None]] | None,
+        rows_affected: int | None,
+        columns: list[str],
+    ):
+        self._handle = handle
+        self._rows = rows
+        self._position = 0
+        self._closed = False
+        self.rows_affected = rows_affected
+        self.columns = columns
+
+    async def fetchmany(self, size: int) -> list[list[str | int | None]]:
+        if self._closed:
+            raise InterfaceError("PostgreSQL query stream is closed")
+        if size <= 0:
+            raise ValueError("query stream fetch size must be greater than zero")
+
+        if self._handle is not None:
+            return await _translate_database_error(
+                _native.fetch_query_stream(self._handle, size)
+            )
+
+        if self._rows is None:
+            raise RuntimeError("Query stream has no result source")
+
+        rows = self._rows[self._position : self._position + size]
+        self._position += len(rows)
+        return rows
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+
+        self._closed = True
+        self._rows = None
+
+        if self._handle is not None:
+            await _translate_database_error(_native.close_query_stream(self._handle))
+            self._handle = None
+
+
 class NativeTransaction:
     def __init__(
         self,
@@ -524,6 +570,39 @@ class NativeExecutor:
                 sql=sql,
                 params=params,
             )
+        )
+
+    async def open_query_stream(
+        self,
+        sql: str,
+        params: QueryParameters | None = None,
+    ) -> NativeQueryStream:
+        transaction = self._active_transaction.get()
+
+        if transaction is not None:
+            rows, rows_affected, columns = await transaction.execute_with_metadata(
+                sql=sql,
+                params=params,
+            )
+            return NativeQueryStream(
+                handle=None,
+                rows=rows,
+                rows_affected=rows_affected,
+                columns=columns,
+            )
+
+        handle, rows_affected, columns = await _translate_database_error(
+            _native.open_query_stream(
+                pool=self.pool,
+                sql=sql,
+                params=params,
+            )
+        )
+        return NativeQueryStream(
+            handle=handle,
+            rows=None,
+            rows_affected=rows_affected,
+            columns=columns,
         )
 
     async def close(self) -> None:
