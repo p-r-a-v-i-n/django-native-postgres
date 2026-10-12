@@ -2120,3 +2120,35 @@ async def test_cancelling_stream_fetch_releases_pool_connection(postgres_databas
         ) == [[2]]
     finally:
         await _native.close_pools()
+
+
+@pytest.mark.asyncio
+async def test_dropping_query_stream_releases_pool_connection(
+    postgres_database_url,
+):
+    await _native.close_pools()
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        wait_timeout_ms=1000,
+    )
+
+    try:
+        stream, _, _ = await _native.open_query_stream(
+            pool=pool,
+            sql="""
+                SELECT value::BIGINT
+                FROM generate_series(1, 100) AS value
+            """,
+        )
+
+        assert await _native.fetch_query_stream(stream, 1) == [[1]]
+
+        del stream
+
+        assert await _native.execute(
+            pool=pool,
+            sql="SELECT 1::BIGINT",
+        ) == [[1]]
+    finally:
+        await _native.close_pools()
