@@ -2046,14 +2046,14 @@ async def test_query_stream_reuses_connection_after_single_row(postgres_pool):
 
 @pytest.mark.asyncio
 async def test_query_stream_holds_pool_connection_until_closed(postgres_database_url):
-    # first close all connection if any
+    # first close all connections if any
     await _native.close_pools()
     pool = _native.create_pool(
         database_url=postgres_database_url, max_size=1, wait_timeout_ms=50
     )
 
     try:
-        # open stream
+        # open the stream
         stream, _, _ = await _native.open_query_stream(
             pool=pool,
             sql="""
@@ -2072,11 +2072,51 @@ async def test_query_stream_holds_pool_connection_until_closed(postgres_database
                 pool=pool,
                 sql="SELECT 1::BIGINT",
             )
-        # close stream
+        # close the stream
         await _native.close_query_stream(stream)
         await _native.execute(
             pool=pool,
             sql="SELECT 1::BIGINT",
         )
+    finally:
+        await _native.close_pools()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_stream_fetch_releases_pool_connection(postgres_database_url):
+    # first close all connections if any
+    await _native.close_pools()
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        wait_timeout_ms=1000,
+    )
+    try:
+        stream, _, _ = await _native.open_query_stream(
+            pool=pool,
+            sql="""
+                SELECT value::BIGINT
+                FROM generate_series(1, 10000) AS value
+
+                UNION ALL
+
+                SELECT 10001::BIGINT
+                FROM pg_sleep(5)
+            """,
+        )
+
+        fetch_task = asyncio.create_task(_native.fetch_query_stream(stream, 10001))
+
+        await asyncio.sleep(0.05)
+
+        assert fetch_task.cancel()  # disconnect from rust
+
+        with pytest.raises(asyncio.CancelledError):
+            await fetch_task
+
+        assert await _native.execute(
+            pool=pool,
+            sql="SELECT 2::BIGINT",
+        ) == [[2]]
     finally:
         await _native.close_pools()
