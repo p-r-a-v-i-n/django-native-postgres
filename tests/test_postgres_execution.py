@@ -2042,3 +2042,41 @@ async def test_query_stream_reuses_connection_after_single_row(postgres_pool):
 
     current_backend_pid = await _get_backend_pid(postgres_pool)
     assert current_backend_pid == backend_pid
+
+
+@pytest.mark.asyncio
+async def test_query_stream_holds_pool_connection_until_closed(postgres_database_url):
+    # first close all connection if any
+    await _native.close_pools()
+    pool = _native.create_pool(
+        database_url=postgres_database_url, max_size=1, wait_timeout_ms=50
+    )
+
+    try:
+        # open stream
+        stream, _, _ = await _native.open_query_stream(
+            pool=pool,
+            sql="""
+            SELECT value::BIGINT
+            FROM generate_series(1, 100)
+            AS value ORDER BY value
+            """,
+        )
+        assert await _native.fetch_query_stream(stream, 1) == [[1]]
+
+        with pytest.raises(
+            RuntimeError,
+            match="failed to acquire PostgreSQL connection",
+        ):
+            await _native.execute(
+                pool=pool,
+                sql="SELECT 1::BIGINT",
+            )
+        # close stream
+        await _native.close_query_stream(stream)
+        await _native.execute(
+            pool=pool,
+            sql="SELECT 1::BIGINT",
+        )
+    finally:
+        await _native.close_pools()
