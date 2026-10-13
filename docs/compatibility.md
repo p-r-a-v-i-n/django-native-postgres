@@ -65,12 +65,16 @@ boundary. See [Django fork requirement](django-fork.md).
 Only text and integer families are currently usable through the native value
 boundary. See [Supported PostgreSQL values](supported-types.md).
 
-### Result buffering
+### Result streaming
 
-Django requests async iterator results in chunks, but the native executor
-currently collects and decodes the complete PostgreSQL result before Python's
-cursor serves those chunks. Large-result memory use is therefore proportional
-to the complete result size.
+Async cursor iteration outside transactions uses a native query-stream handle
+and fetches bounded decoded batches. The stream pins one pooled connection
+until completion or cleanup.
+
+`afetchall()`, direct eager execution methods, and queries inside
+`transaction.atomic()` still collect complete results. Transaction-owned
+streaming remains future work. The batch boundary is not an exact memory bound
+for PostgreSQL or `tokio-postgres` internal protocol buffers.
 
 ### TLS
 

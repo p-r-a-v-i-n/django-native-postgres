@@ -6,8 +6,8 @@ and `tokio-postgres`.
 > [!WARNING]
 > This project is experimental and it currently requires a
 > development fork of Django, supports only a small set
-> of PostgreSQL value types, buffers complete query results in memory, and
-> connects without TLS.
+> of PostgreSQL value types, still buffers complete results on some execution
+> paths, and connects without TLS.
 
 ## Installation
 
@@ -66,6 +66,8 @@ The project integration suite currently covers:
 - transaction isolation, read-only, and deferrable options;
 - Rust-owned connection pooling with bounded concurrency and acquisition
   timeouts;
+- bounded native result batches for async cursor iteration outside
+  transactions;
 - cancellation of active and pool-waiting queries;
 - runtime and pool recreation after POSIX `fork()`, with inherited transaction
   handles rejected.
@@ -81,8 +83,9 @@ suite, but the project still has the following release limitations:
 - The native async ORM contract exists only in the project's Django fork.
 - Query parameters currently support only strings, integers, and `None`.
 - Result decoding currently supports text and integer PostgreSQL types.
-- Async iteration is exposed in chunks, but Rust currently buffers the entire
-  result before the first chunk reaches Django.
+- Async cursor iteration outside transactions uses bounded native batches.
+  `afetchall()`, direct eager execution, and transaction-bound queries still
+  collect complete results.
 - Native PostgreSQL connections currently use `NoTls`.
 - The project has not yet completed Django's PostgreSQL compatibility suite or
   a supported platform and PostgreSQL version matrix.
