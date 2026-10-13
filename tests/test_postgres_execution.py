@@ -2225,3 +2225,29 @@ async def test_query_stream_releases_connection_after_decode_error(
         ) == [[2]]
     finally:
         await _native.close_pools()
+
+
+@pytest.mark.asyncio
+async def test_query_stream_fetches_large_result_in_bounded_batches(postgres_pool):
+    row_count = 10000
+    batch_size = 128
+
+    stream, _, _ = await _native.open_query_stream(
+        pool=postgres_pool,
+        sql="""
+            SELECT value::BIGINT
+            FROM generate_series(1, %s) AS value
+        """,
+        params=(row_count,),
+    )
+
+    expected_value = 1
+
+    while batch := await _native.fetch_query_stream(stream, batch_size):
+        assert len(batch) <= batch_size
+
+        for row in batch:
+            assert row == [expected_value]
+            expected_value += 1
+
+    assert expected_value == row_count + 1
