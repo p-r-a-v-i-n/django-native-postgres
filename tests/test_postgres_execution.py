@@ -2191,3 +2191,37 @@ async def test_query_stream_releases_connection_after_postgres_error(
         ) == [[2]]
     finally:
         await _native.close_pools()
+
+
+@pytest.mark.asyncio
+async def test_query_stream_releases_connection_after_decode_error(
+    postgres_database_url,
+):
+    await _native.close_pools()
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        wait_timeout_ms=1000,
+    )
+
+    try:
+        stream, _, _ = await _native.open_query_stream(
+            pool=pool,
+            sql="""
+                SELECT point(value, value)
+                FROM generate_series(1, 10000) AS value
+            """,
+        )
+
+        with pytest.raises(
+            _native.PostgresNotSupportedError,
+            match="unsupported PostgreSQL type point at column 0",
+        ):
+            await _native.fetch_query_stream(stream, 10000)
+
+        assert await _native.execute(
+            pool=pool,
+            sql="SELECT 2::BIGINT",
+        ) == [[2]]
+    finally:
+        await _native.close_pools()
