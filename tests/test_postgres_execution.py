@@ -2282,3 +2282,41 @@ async def test_async_cursor_closes_previous_stream_before_reexecute(
             assert await cursor.afetchone() == [2]
     finally:
         await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_close_pool_allows_active_query_stream_to_finish(
+    postgres_database_url,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+    )
+
+    try:
+        stream, _, _ = await _native.open_query_stream(
+            pool=pool,
+            sql="""
+                SELECT value::BIGINT
+                FROM generate_series(1, 5) AS value
+            """,
+        )
+
+        assert await _native.fetch_query_stream(stream, 2) == [[1], [2]]
+
+        await _native.close_pool(pool)
+
+        with pytest.raises(
+            _native.PostgresInterfaceError,
+            match="PostgreSQL pool handle is closed",
+        ):
+            await _native.execute(
+                pool=pool,
+                sql="SELECT 1::BIGINT",
+            )
+
+        assert await _native.fetch_query_stream(stream, 2) == [[3], [4]]
+        assert await _native.fetch_query_stream(stream, 2) == [[5]]
+        assert await _native.fetch_query_stream(stream, 2) == []
+    finally:
+        await _native.close_pools()
