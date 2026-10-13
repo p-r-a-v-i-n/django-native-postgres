@@ -1,6 +1,7 @@
 import asyncio
 import multiprocessing
 import os
+from types import SimpleNamespace
 
 import pytest
 from django.db import (
@@ -13,6 +14,7 @@ from django.db import (
     ProgrammingError,
 )
 from django_native_postgres import _native
+from django_native_postgres.cursor import NativeAsyncCursor
 from django_native_postgres.executor import NativeExecutor
 
 
@@ -2251,3 +2253,32 @@ async def test_query_stream_fetches_large_result_in_bounded_batches(postgres_poo
             expected_value += 1
 
     assert expected_value == row_count + 1
+
+
+@pytest.mark.asyncio
+async def test_async_cursor_closes_previous_stream_before_reexecute(
+    postgres_database_url,
+):
+    executor = NativeExecutor(
+        database_url=postgres_database_url,
+        pool_max_size=1,
+        pool_wait_timeout_ms=1000,
+    )
+    connection = SimpleNamespace(aopen_query_stream=executor.open_query_stream)
+
+    try:
+        async with NativeAsyncCursor(connection) as cursor:
+            await cursor.aexecute(
+                sql="""
+                    SELECT value::BIGINT
+                    FROM generate_series(1, 100) AS value
+                """,
+            )
+
+            assert await cursor.afetchone() == [1]
+
+            await cursor.aexecute(sql="SELECT 2::BIGINT")
+
+            assert await cursor.afetchone() == [2]
+    finally:
+        await executor.close()
