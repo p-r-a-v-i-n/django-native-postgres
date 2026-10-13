@@ -352,6 +352,37 @@ class NativeTransaction:
             self._mark_for_rollback()
             raise
 
+    async def open_query_stream(
+        self,
+        sql: str,
+        params: QueryParameters | None = None,
+    ) -> NativeQueryStream:
+        transaction_handle = self._handle
+
+        if transaction_handle is None:
+            raise RuntimeError("Native transaction is not active")
+
+        self._validate_usable()
+
+        try:
+            stream_handle, rows_affected, columns = await _translate_database_error(
+                _native.open_transaction_query_stream(
+                    transaction=transaction_handle,
+                    sql=sql,
+                    params=params,
+                )
+            )
+        except BaseException:
+            self._mark_for_rollback()
+            raise
+
+        return NativeQueryStream(
+            handle=stream_handle,
+            rows=None,
+            rows_affected=rows_affected,
+            columns=columns,
+        )
+
     async def __aexit__(
         self,
         exception_type: type[BaseException] | None,
@@ -580,15 +611,9 @@ class NativeExecutor:
         transaction = self._active_transaction.get()
 
         if transaction is not None:
-            rows, rows_affected, columns = await transaction.execute_with_metadata(
+            return await transaction.open_query_stream(
                 sql=sql,
                 params=params,
-            )
-            return NativeQueryStream(
-                handle=None,
-                rows=rows,
-                rows_affected=rows_affected,
-                columns=columns,
             )
 
         handle, rows_affected, columns = await _translate_database_error(
