@@ -48,6 +48,7 @@ The project is responsible for:
 - async database execution;
 - Django placeholder rewriting;
 - native parameter binding and result decoding;
+- bounded result batches for autocommit async cursor iteration;
 - bounded PostgreSQL connection pooling;
 - transaction and savepoint execution;
 - task cancellation and connection recovery;
@@ -88,25 +89,35 @@ transaction methods used by the Django fork.
 - `afetchmany()`; and
 - `afetchall()`.
 
-The cursor currently receives the entire decoded result from Rust. Its fetch
-methods control how rows are presented to Django, not how many rows Rust keeps
-in memory. True bounded streaming is future architecture work.
+Outside a native transaction, `aexecute()` opens a Rust-owned query stream.
+Each cursor fetch requests a bounded row batch, and closing or replacing the
+cursor closes its current stream. `afetchall()` repeatedly fetches bounded
+native batches but still builds one complete Python list.
+
+Inside a native transaction, the executor currently uses the eager transaction
+result API. This keeps the query on the transaction actor's pinned connection,
+but the complete decoded result is buffered before cursor fetching begins.
+Transaction-owned streaming requires integration with that actor and remains
+future work.
 
 ## PyO3 boundary
 
-Python receives opaque `PoolHandle` and `TransactionHandle` objects. It never
-receives or manipulates a `tokio-postgres` connection.
+Python receives opaque `PoolHandle`, `TransactionHandle`, and
+`QueryStreamHandle` objects. It never receives or manipulates a
+`tokio-postgres` connection or row stream.
 
-Crossing the boundary once per operation keeps connection ownership in Rust
-and avoids one Python/Rust call per result value. Future streaming should cross
-once per bounded row batch.
+Eager operations cross the boundary once for their complete result. A query
+stream crosses once to open, once per bounded row batch, and once to close when
+it is not already exhausted. This avoids one Python/Rust call per result value
+while keeping connection and row-stream ownership in Rust.
 
 The native boundary exposes three result shapes. `execute()` returns rows,
 `execute_result()` adds the affected-row count, and `execute_with_metadata()`
-also adds column names. `NativeAsyncCursor` uses the metadata form. SQLSTATE
-and selected PostgreSQL diagnostics are attached to native database exceptions
-so the Python layer can map them into Django's exception hierarchy without
-parsing error text.
+also adds column names. These APIs remain eager. The query-stream API returns
+its handle, optional affected-row count, and column names when opened; later
+fetches return bounded row batches. SQLSTATE and selected PostgreSQL
+diagnostics are attached to native database exceptions so the Python layer can
+map them into Django's exception hierarchy without parsing error text.
 
 ## Runtime ownership
 
@@ -127,8 +138,9 @@ database URL or Django alias, identifies the Rust pool. Two executors using the
 same connection settings therefore have independent pool limits and lifecycle.
 
 The pool is created lazily on first execution. Autocommit queries borrow any
-available connection and return it after execution. Pool acquisition has a
-separate configurable wait timeout.
+available connection and return it after execution. An autocommit query stream
+keeps its borrowed connection until exhaustion or cleanup. Pool acquisition
+has a separate configurable wait timeout.
 
 See [Connection pool design](connection-pool-design.md) for lifecycle and
 failure behavior.
@@ -160,6 +172,10 @@ can be reused. An autocommit connection whose state is uncertain is detached
 from the pool. When a query inside a `NativeTransaction` is cancelled, the
 Python transaction wrapper marks the transaction rollback-only. Exiting the
 transaction context then rolls it back.
+
+Cancelling a query-stream fetch signals the stream actor. Explicit closure or
+dropping the final stream handle also stops an unfinished query and releases
+or discards its connection according to the same safety rule.
 
 ## Error boundary
 
@@ -194,7 +210,7 @@ ORM operations are not moved onto the Tokio runtime by this project.
 The main areas still being developed are:
 
 1. support for more PostgreSQL parameter and result types;
-2. bounded result streaming and backpressure;
+2. transaction-owned result streaming and broader memory validation;
 3. TLS and additional PostgreSQL connection options;
 4. session initialization and reset behavior;
 5. broader Django compatibility testing; and

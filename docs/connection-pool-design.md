@@ -73,6 +73,38 @@ The pool provides backpressure. When every connection is busy, another query
 waits instead of opening connections without a bound. If the configured wait
 timeout expires, Django receives `OperationalError`.
 
+## Query stream lifecycle
+
+Outside a native transaction, the async cursor opens an opaque
+`QueryStreamHandle`. Its Rust actor owns both the PostgreSQL row stream and one
+borrowed pool connection:
+
+```text
+open stream
+      |
+      v
+borrow and pin connection
+      |
+      +--> fetch bounded batch
+      +--> wait while Python consumes it
+      +--> fetch next bounded batch
+      |
+      v
+exhaust, close, cancel, or drop
+      |
+      v
+return or discard connection
+```
+
+Another operation must wait when active streams occupy every connection.
+Normal exhaustion returns a healthy connection. Closing an unfinished stream,
+cancelling a fetch, or dropping the final handle cancels and drains the query;
+Rust reuses the connection only when its protocol state is known to be safe.
+
+The command channel is bounded, and Rust decodes at most the requested batch
+plus one lookahead row. This provides application-level backpressure without
+collecting the complete decoded result before Python can consume it.
+
 ## Transaction connection affinity
 
 A transaction must use one physical connection from begin through commit or
@@ -127,6 +159,9 @@ Cancellation is handled differently depending on where a query is waiting:
 
 - A request waiting for a pool connection is removed and never executes later.
 - An active query is cancelled through PostgreSQL's cancellation protocol.
+- Cancelling a query-stream fetch terminates and cleans up that stream.
+- Dropping the final stream handle cleans up an unfinished stream even when no
+  fetch is currently waiting.
 - Rust drains the original response before reusing the connection.
 - Cancelling a transaction query marks the Python transaction rollback-only;
   leaving its atomic context then rolls it back.
@@ -140,7 +175,7 @@ and holding a pooled connection.
 for that handle:
 
 - idle connections are closed;
-- an already active query or transaction may finish;
+- an already active query, query stream, or transaction may finish;
 - returned connections are dropped after closure;
 - new work through that handle fails with `InterfaceError`; and
 - closing the handle repeatedly is safe.
@@ -177,6 +212,7 @@ The integration suite verifies:
 - independent pool closure;
 - closure before first use and repeated closure;
 - closure during active queries and transactions;
+- query-stream connection pinning, bounded batches, cleanup, and pool closure;
 - transaction connection pinning and release;
 - cancellation while waiting and while executing; and
 - runtime and pool recreation after `fork()`.

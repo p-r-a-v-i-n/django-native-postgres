@@ -1,6 +1,7 @@
 import asyncio
 import multiprocessing
 import os
+from types import SimpleNamespace
 
 import pytest
 from django.db import (
@@ -13,6 +14,7 @@ from django.db import (
     ProgrammingError,
 )
 from django_native_postgres import _native
+from django_native_postgres.cursor import NativeAsyncCursor
 from django_native_postgres.executor import NativeExecutor
 
 
@@ -1988,3 +1990,333 @@ def test_pool_is_recreated_after_fork(postgres_database_url):
         receiver.close()
         sender.close()
         asyncio.run(_native.close_pools())
+
+
+@pytest.mark.asyncio
+async def test_query_stream_fetches_rows(postgres_pool):
+    stream, rows_affected, columns = await _native.open_query_stream(
+        pool=postgres_pool,
+        sql="""SELECT value::BIGINT
+        FROM generate_series(1, 5) AS value
+        ORDER BY value
+        """,
+    )
+
+    assert rows_affected is None
+    assert columns == ["value"]
+    assert await _native.fetch_query_stream(stream, 2) == [[1], [2]]
+    assert await _native.fetch_query_stream(stream, 2) == [[3], [4]]
+    assert await _native.fetch_query_stream(stream, 2) == [[5]]
+    assert await _native.fetch_query_stream(stream, 2) == []
+
+
+@pytest.mark.asyncio
+async def test_query_stream_reports_affected_rows_for_non_row_query(postgres_pool):
+    await _native.execute(
+        pool=postgres_pool,
+        sql="CREATE TEMPORARY TABLE native_query_stream_update (value BIGINT)",
+    )
+    await _native.execute(
+        pool=postgres_pool,
+        sql="INSERT INTO native_query_stream_update VALUES (1), (2)",
+    )
+
+    stream, rows_affected, columns = await _native.open_query_stream(
+        pool=postgres_pool,
+        sql="UPDATE native_query_stream_update SET value = value + 1",
+    )
+
+    assert rows_affected == 2
+    assert columns == []
+    assert await _native.fetch_query_stream(stream, 1) == []
+
+
+@pytest.mark.asyncio
+async def test_query_stream_reuses_connection_after_single_row(postgres_pool):
+    backend_pid = await _get_backend_pid(postgres_pool)
+    stream, _, _ = await _native.open_query_stream(
+        pool=postgres_pool,
+        sql="SELECT pg_backend_pid()::BIGINT",
+    )
+
+    assert await _native.fetch_query_stream(stream, 1) == [[backend_pid]]
+    await _native.close_query_stream(stream)
+
+    current_backend_pid = await _get_backend_pid(postgres_pool)
+    assert current_backend_pid == backend_pid
+
+
+@pytest.mark.asyncio
+async def test_query_stream_holds_pool_connection_until_closed(postgres_database_url):
+    # first close all connections if any
+    await _native.close_pools()
+    pool = _native.create_pool(
+        database_url=postgres_database_url, max_size=1, wait_timeout_ms=50
+    )
+
+    try:
+        # open the stream
+        stream, _, _ = await _native.open_query_stream(
+            pool=pool,
+            sql="""
+            SELECT value::BIGINT
+            FROM generate_series(1, 100)
+            AS value ORDER BY value
+            """,
+        )
+        assert await _native.fetch_query_stream(stream, 1) == [[1]]
+
+        with pytest.raises(
+            RuntimeError,
+            match="failed to acquire PostgreSQL connection",
+        ):
+            await _native.execute(
+                pool=pool,
+                sql="SELECT 1::BIGINT",
+            )
+        # close the stream
+        await _native.close_query_stream(stream)
+        await _native.execute(
+            pool=pool,
+            sql="SELECT 1::BIGINT",
+        )
+    finally:
+        await _native.close_pools()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_stream_fetch_releases_pool_connection(postgres_database_url):
+    # first close all connections if any
+    await _native.close_pools()
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        wait_timeout_ms=1000,
+    )
+    try:
+        stream, _, _ = await _native.open_query_stream(
+            pool=pool,
+            sql="""
+                SELECT value::BIGINT
+                FROM generate_series(1, 10000) AS value
+
+                UNION ALL
+
+                SELECT 10001::BIGINT
+                FROM pg_sleep(5)
+            """,
+        )
+
+        fetch_task = asyncio.create_task(_native.fetch_query_stream(stream, 10001))
+
+        await asyncio.sleep(0.05)
+
+        assert fetch_task.cancel()  # disconnect from rust
+
+        with pytest.raises(asyncio.CancelledError):
+            await fetch_task
+
+        assert await _native.execute(
+            pool=pool,
+            sql="SELECT 2::BIGINT",
+        ) == [[2]]
+    finally:
+        await _native.close_pools()
+
+
+@pytest.mark.asyncio
+async def test_dropping_query_stream_releases_pool_connection(
+    postgres_database_url,
+):
+    await _native.close_pools()
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        wait_timeout_ms=1000,
+    )
+
+    try:
+        stream, _, _ = await _native.open_query_stream(
+            pool=pool,
+            sql="""
+                SELECT value::BIGINT
+                FROM generate_series(1, 100) AS value
+            """,
+        )
+
+        assert await _native.fetch_query_stream(stream, 1) == [[1]]
+
+        del stream
+
+        assert await _native.execute(
+            pool=pool,
+            sql="SELECT 1::BIGINT",
+        ) == [[1]]
+    finally:
+        await _native.close_pools()
+
+
+@pytest.mark.asyncio
+async def test_query_stream_releases_connection_after_postgres_error(
+    postgres_database_url,
+):
+    await _native.close_pools()
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        wait_timeout_ms=2000,
+    )
+
+    try:
+        stream, _, _ = await _native.open_query_stream(
+            pool=pool,
+            sql="""
+                SELECT value::BIGINT
+                FROM generate_series(1, 10000) AS value
+
+                UNION ALL
+
+                SELECT (1 / (random() * 0)::BIGINT)::BIGINT
+                FROM pg_sleep(1)
+            """,
+        )
+
+        with pytest.raises(
+            _native.PostgresDatabaseError,
+            match="division by zero",
+        ):
+            await _native.fetch_query_stream(stream, 10001)
+
+        assert await _native.execute(
+            pool=pool,
+            sql="SELECT 2::BIGINT",
+        ) == [[2]]
+    finally:
+        await _native.close_pools()
+
+
+@pytest.mark.asyncio
+async def test_query_stream_releases_connection_after_decode_error(
+    postgres_database_url,
+):
+    await _native.close_pools()
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        wait_timeout_ms=1000,
+    )
+
+    try:
+        stream, _, _ = await _native.open_query_stream(
+            pool=pool,
+            sql="""
+                SELECT point(value, value)
+                FROM generate_series(1, 10000) AS value
+            """,
+        )
+
+        with pytest.raises(
+            _native.PostgresNotSupportedError,
+            match="unsupported PostgreSQL type point at column 0",
+        ):
+            await _native.fetch_query_stream(stream, 10000)
+
+        assert await _native.execute(
+            pool=pool,
+            sql="SELECT 2::BIGINT",
+        ) == [[2]]
+    finally:
+        await _native.close_pools()
+
+
+@pytest.mark.asyncio
+async def test_query_stream_fetches_large_result_in_bounded_batches(postgres_pool):
+    row_count = 10000
+    batch_size = 128
+
+    stream, _, _ = await _native.open_query_stream(
+        pool=postgres_pool,
+        sql="""
+            SELECT value::BIGINT
+            FROM generate_series(1, %s) AS value
+        """,
+        params=(row_count,),
+    )
+
+    expected_value = 1
+
+    while batch := await _native.fetch_query_stream(stream, batch_size):
+        assert len(batch) <= batch_size
+
+        for row in batch:
+            assert row == [expected_value]
+            expected_value += 1
+
+    assert expected_value == row_count + 1
+
+
+@pytest.mark.asyncio
+async def test_async_cursor_closes_previous_stream_before_reexecute(
+    postgres_database_url,
+):
+    executor = NativeExecutor(
+        database_url=postgres_database_url,
+        pool_max_size=1,
+        pool_wait_timeout_ms=1000,
+    )
+    connection = SimpleNamespace(aopen_query_stream=executor.open_query_stream)
+
+    try:
+        async with NativeAsyncCursor(connection) as cursor:
+            await cursor.aexecute(
+                sql="""
+                    SELECT value::BIGINT
+                    FROM generate_series(1, 100) AS value
+                """,
+            )
+
+            assert await cursor.afetchone() == [1]
+
+            await cursor.aexecute(sql="SELECT 2::BIGINT")
+
+            assert await cursor.afetchone() == [2]
+    finally:
+        await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_close_pool_allows_active_query_stream_to_finish(
+    postgres_database_url,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+    )
+
+    try:
+        stream, _, _ = await _native.open_query_stream(
+            pool=pool,
+            sql="""
+                SELECT value::BIGINT
+                FROM generate_series(1, 5) AS value
+            """,
+        )
+
+        assert await _native.fetch_query_stream(stream, 2) == [[1], [2]]
+
+        await _native.close_pool(pool)
+
+        with pytest.raises(
+            _native.PostgresInterfaceError,
+            match="PostgreSQL pool handle is closed",
+        ):
+            await _native.execute(
+                pool=pool,
+                sql="SELECT 1::BIGINT",
+            )
+
+        assert await _native.fetch_query_stream(stream, 2) == [[3], [4]]
+        assert await _native.fetch_query_stream(stream, 2) == [[5]]
+        assert await _native.fetch_query_stream(stream, 2) == []
+    finally:
+        await _native.close_pools()

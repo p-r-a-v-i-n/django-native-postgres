@@ -18,6 +18,7 @@ mod parameter;
 mod placeholders;
 mod pool;
 mod postgres;
+mod query_stream;
 mod runtime;
 mod transaction;
 mod transaction_options;
@@ -160,6 +161,39 @@ async fn close_pools() -> PyResult<()> {
     runtime::close_pools().await.map_err(to_python_error)
 }
 
+#[pyfunction(signature = (pool, sql, params=None))]
+async fn open_query_stream(
+    pool: Py<pool::PoolHandle>,
+    sql: String,
+    params: Option<parameter::QueryParameters>,
+) -> PyResult<(
+    query_stream::QueryStreamHandle,
+    Option<u64>,
+    postgres::QueryColumns,
+)> {
+    runtime::open_query_stream(pool.get().clone(), sql, params.unwrap_or_default())
+        .await
+        .map(|result| (result.handle, result.rows_affected, result.columns))
+        .map_err(to_python_error)
+}
+
+#[pyfunction]
+async fn fetch_query_stream(
+    stream: Py<query_stream::QueryStreamHandle>,
+    size: usize,
+) -> PyResult<postgres::QueryRows> {
+    query_stream::fetch(stream.get().clone(), size)
+        .await
+        .map_err(to_python_error)
+}
+
+#[pyfunction]
+async fn close_query_stream(stream: Py<query_stream::QueryStreamHandle>) -> PyResult<()> {
+    query_stream::close(stream.get().clone())
+        .await
+        .map_err(to_python_error)
+}
+
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add(
@@ -192,6 +226,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     module.add_class::<pool::PoolHandle>()?;
     module.add_class::<transaction::TransactionHandle>()?;
+    module.add_class::<query_stream::QueryStreamHandle>()?;
 
     module.add_function(wrap_pyfunction!(build_info, module)?)?;
     module.add_function(wrap_pyfunction!(runtime_probe, module)?)?;
@@ -207,6 +242,9 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(execute_transaction_with_metadata, module)?)?;
     module.add_function(wrap_pyfunction!(commit_transaction, module)?)?;
     module.add_function(wrap_pyfunction!(rollback_transaction, module)?)?;
+    module.add_function(wrap_pyfunction!(open_query_stream, module)?)?;
+    module.add_function(wrap_pyfunction!(fetch_query_stream, module)?)?;
+    module.add_function(wrap_pyfunction!(close_query_stream, module)?)?;
     Ok(())
 }
 
@@ -315,7 +353,9 @@ fn to_python_error(error: NativeError) -> PyErr {
         | NativeError::ResponseChannelClosed
         | NativeError::PoolHandleClosed
         | NativeError::TransactionHandleClosed
-        | NativeError::TransactionHandleProcessMismatch) => {
+        | NativeError::TransactionHandleProcessMismatch
+        | NativeError::QueryStreamHandleClosed
+        | NativeError::QueryStreamHandleProcessMismatch) => {
             PostgresInterfaceError::new_err(error.to_string())
         }
         error @ NativeError::PostgresDecode { .. } => PostgresDataError::new_err(error.to_string()),
@@ -326,9 +366,8 @@ fn to_python_error(error: NativeError) -> PyErr {
         error @ NativeError::UnsupportedPostgresType { .. } => {
             PostgresNotSupportedError::new_err(error.to_string())
         }
-        error @ NativeError::InvalidTransactionIsolationLevel(_) => {
-            PyValueError::new_err(error.to_string())
-        }
+        error @ (NativeError::InvalidTransactionIsolationLevel(_)
+        | NativeError::InvalidQueryStreamFetchSize) => PyValueError::new_err(error.to_string()),
         error => PyRuntimeError::new_err(error.to_string()),
     }
 }

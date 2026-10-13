@@ -9,26 +9,35 @@ type QueryParameters = Sequence[QueryParameter] | Mapping[str, QueryParameter]
 type QueryRow = list[str | int | None]
 type CursorDescription = tuple[str, None, None, None, None, None, None]
 
+_FETCH_ALL_CHUNK_SIZE = 2000
+
+
+class AsyncQueryStream(Protocol):
+    rows_affected: int | None
+    columns: list[str]
+
+    async def fetchmany(self, size: int) -> list[QueryRow]: ...
+
+    async def close(self) -> None: ...
+
 
 class AsyncConnection(Protocol):
-    async def aexecute_with_metadata(
+    async def aopen_query_stream(
         self,
         sql: str,
         params: QueryParameters | None = None,
-    ) -> tuple[list[QueryRow], int, list[str]]: ...
+    ) -> AsyncQueryStream: ...
 
 
 class NativeAsyncCursor:
     def __init__(self, connection: AsyncConnection):
         self.connection = connection
-        self._rows: list[QueryRow] | None = None
-        self._position = 0
+        self._stream: AsyncQueryStream | None = None
         self.rowcount = -1
         self.description: list[CursorDescription] | None = None
 
     async def __aenter__(self) -> NativeAsyncCursor:
-        self._rows = None
-        self._position = 0
+        await self._close_stream()
         self.rowcount = -1
         self.description = None
         return self
@@ -39,52 +48,53 @@ class NativeAsyncCursor:
         exception: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        self._rows = None
-        self._position = 0
-        self.rowcount = -1
-        self.description = None
+        try:
+            await self._close_stream()
+        finally:
+            self.rowcount = -1
+            self.description = None
+
+    async def _close_stream(self) -> None:
+        stream = self._stream
+        self._stream = None
+        if stream is not None:
+            await stream.close()
 
     async def aexecute(
         self,
         sql: str,
         params: QueryParameters | None = None,
     ) -> None:
-        self._rows = None
-        self._position = 0
+        await self._close_stream()
         self.rowcount = -1
         self.description = None
-        (
-            self._rows,
-            self.rowcount,
-            columns,
-        ) = await self.connection.aexecute_with_metadata(sql, params)
+
+        stream = await self.connection.aopen_query_stream(sql, params)
+        self._stream = stream
+        if stream.rows_affected is not None:
+            self.rowcount = stream.rows_affected
         self.description = [
-            (column, None, None, None, None, None, None) for column in columns
+            (column, None, None, None, None, None, None) for column in stream.columns
         ]
 
     async def afetchone(self) -> QueryRow | None:
-        if self._rows is None:
+        if self._stream is None:
             raise RuntimeError("No active query result on this cursor")
 
-        if self._position >= len(self._rows):
-            return None
-
-        row = self._rows[self._position]
-        self._position += 1
-        return row
+        rows = await self._stream.fetchmany(1)
+        return rows[0] if rows else None
 
     async def afetchmany(self, size: int = 1) -> list[QueryRow]:
-        if self._rows is None:
+        if self._stream is None:
             raise RuntimeError("No active query result on this cursor")
 
-        rows = self._rows[self._position : self._position + size]
-        self._position += len(rows)
-        return rows
+        return await self._stream.fetchmany(size)
 
     async def afetchall(self) -> list[QueryRow]:
-        if self._rows is None:
+        if self._stream is None:
             raise RuntimeError("No active query result on this cursor")
 
-        rows = self._rows[self._position :]
-        self._position = len(self._rows)
+        rows = []
+        while batch := await self._stream.fetchmany(_FETCH_ALL_CHUNK_SIZE):
+            rows.extend(batch)
         return rows

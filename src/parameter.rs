@@ -1,10 +1,31 @@
 use std::collections::HashMap;
 
 use pyo3::prelude::*;
-use tokio_postgres::types::{ToSql, Type};
+use tokio_postgres::types::{IsNull, ToSql, Type};
 
 use crate::error::NativeError;
 use crate::placeholders::{rewrite_django_named_placeholders, rewrite_django_placeholders};
+
+#[derive(Debug)]
+struct PostgresNull;
+
+static POSTGRES_NULL: PostgresNull = PostgresNull;
+
+impl ToSql for PostgresNull {
+    fn to_sql(
+        &self,
+        _postgres_type: &Type,
+        _output: &mut tokio_postgres::types::private::BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        Ok(IsNull::Yes)
+    }
+
+    fn accepts(_postgres_type: &Type) -> bool {
+        true
+    }
+
+    tokio_postgres::types::to_sql_checked!();
+}
 
 #[derive(Debug, FromPyObject)]
 pub(crate) enum QueryParameter {
@@ -62,7 +83,10 @@ impl QueryParameter {
         match self {
             Self::Text(value) => value,
             Self::Integer(value) => value,
-            Self::Null(value) => value,
+            Self::Null(value) => {
+                debug_assert!(value.is_none());
+                &POSTGRES_NULL
+            }
         }
     }
 

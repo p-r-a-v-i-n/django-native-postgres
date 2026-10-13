@@ -363,13 +363,13 @@ async def test_django_aexists_executes_through_native_backend(
 
     with mock.patch.object(
         executor,
-        "execute_with_metadata",
-        wraps=executor.execute_with_metadata,
-    ) as execute_with_metadata:
+        "open_query_stream",
+        wraps=executor.open_query_stream,
+    ) as open_query_stream:
         result = await Book.objects.filter(name=name).aexists()
 
     assert result is expected
-    execute_with_metadata.assert_awaited_once()
+    open_query_stream.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -378,13 +378,13 @@ async def test_django_async_iteration_executes_through_native_backend(django_boo
 
     with mock.patch.object(
         executor,
-        "execute_with_metadata",
-        wraps=executor.execute_with_metadata,
-    ) as execute_with_metadata:
+        "open_query_stream",
+        wraps=executor.open_query_stream,
+    ) as open_query_stream:
         books = [book async for book in Book.objects.order_by("name")]
 
     assert [book.name for book in books] == ["Async", "Django", "PostgreSQL"]
-    execute_with_metadata.assert_awaited_once()
+    open_query_stream.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -393,9 +393,9 @@ async def test_django_async_iteration_supports_values_iterables(django_books):
 
     with mock.patch.object(
         executor,
-        "execute_with_metadata",
-        wraps=executor.execute_with_metadata,
-    ) as execute_with_metadata:
+        "open_query_stream",
+        wraps=executor.open_query_stream,
+    ) as open_query_stream:
         values = [value async for value in Book.objects.order_by("name").values("name")]
         tuples = [
             value async for value in Book.objects.order_by("name").values_list("name")
@@ -418,16 +418,26 @@ async def test_django_async_iteration_supports_values_iterables(django_books):
     assert tuples == [(name,) for name in names]
     assert flat_values == names
     assert [value.name for value in named_values] == names
-    assert execute_with_metadata.await_count == 4
+    assert open_query_stream.await_count == 4
 
 
 @pytest.mark.asyncio
 async def test_django_aiterator_fetches_all_rows_in_chunks(django_books):
-    books = [
-        book async for book in Book.objects.order_by("name").aiterator(chunk_size=2)
-    ]
+    native_fetch = _native.fetch_query_stream
+
+    async def fetch_query_stream_side_effect(*args):
+        return await native_fetch(*args)
+
+    with mock.patch(
+        "django_native_postgres.executor._native.fetch_query_stream",
+        new=mock.AsyncMock(side_effect=fetch_query_stream_side_effect),
+    ) as fetch_query_stream:
+        books = [
+            book async for book in Book.objects.order_by("name").aiterator(chunk_size=2)
+        ]
 
     assert [book.name for book in books] == ["Async", "Django", "PostgreSQL"]
+    assert [call.args[1] for call in fetch_query_stream.await_args_list] == [2, 2, 2]
 
 
 @pytest.mark.asyncio
@@ -438,8 +448,19 @@ async def test_django_aiterator_can_be_closed_early(django_books):
         .aiterator(chunk_size=1)
     )
 
-    assert await anext(iterator) == "Async"
-    await iterator.aclose()
+    native_close = _native.close_query_stream
+
+    async def close_query_stream_side_effect(*args):
+        return await native_close(*args)
+
+    with mock.patch(
+        "django_native_postgres.executor._native.close_query_stream",
+        new=mock.AsyncMock(side_effect=close_query_stream_side_effect),
+    ) as close_query_stream:
+        assert await anext(iterator) == "Async"
+        await iterator.aclose()
+
+    close_query_stream.assert_awaited_once()
 
     names = [
         name
@@ -455,9 +476,9 @@ async def test_django_async_row_helpers_execute_through_native_backend(django_bo
 
     with mock.patch.object(
         executor,
-        "execute_with_metadata",
-        wraps=executor.execute_with_metadata,
-    ) as execute_with_metadata:
+        "open_query_stream",
+        wraps=executor.open_query_stream,
+    ) as open_query_stream:
         django = await Book.objects.aget(name="Django")
         first = await Book.objects.order_by("name").afirst()
         last = await Book.objects.order_by("name").alast()
@@ -473,7 +494,7 @@ async def test_django_async_row_helpers_execute_through_native_backend(django_bo
     assert latest.name == "PostgreSQL"
     assert contains is True
     assert sorted(book.name for book in books_by_id.values()) == expected_names
-    assert execute_with_metadata.await_count == 7
+    assert open_query_stream.await_count == 7
 
 
 @pytest.mark.asyncio
@@ -482,9 +503,9 @@ async def test_django_async_scalar_queries_execute_through_native_backend(django
 
     with mock.patch.object(
         executor,
-        "execute_with_metadata",
-        wraps=executor.execute_with_metadata,
-    ) as execute_with_metadata:
+        "open_query_stream",
+        wraps=executor.open_query_stream,
+    ) as open_query_stream:
         count = await Book.objects.acount()
         aggregate = await Book.objects.aaggregate(total=Count("id"))
         explanation = await Book.objects.order_by("name").aexplain()
@@ -492,7 +513,7 @@ async def test_django_async_scalar_queries_execute_through_native_backend(django
     assert count == 3
     assert aggregate == {"total": 3}
     assert "Sort" in explanation
-    assert execute_with_metadata.await_count == 3
+    assert open_query_stream.await_count == 3
 
 
 @pytest.mark.asyncio
@@ -501,9 +522,9 @@ async def test_django_aupdate_executes_through_native_backend(django_books):
 
     with mock.patch.object(
         executor,
-        "execute_with_metadata",
-        wraps=executor.execute_with_metadata,
-    ) as execute_with_metadata:
+        "open_query_stream",
+        wraps=executor.open_query_stream,
+    ) as open_query_stream:
         rows_updated = await Book.objects.filter(name="Django").aupdate(name="Updated")
 
     names = [
@@ -512,7 +533,7 @@ async def test_django_aupdate_executes_through_native_backend(django_books):
     ]
     assert rows_updated == 1
     assert names == ["Async", "PostgreSQL", "Updated"]
-    execute_with_metadata.assert_awaited_once()
+    open_query_stream.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -523,9 +544,9 @@ async def test_django_acreate_and_asave_execute_through_native_backend(
 
     with mock.patch.object(
         executor,
-        "execute_with_metadata",
-        wraps=executor.execute_with_metadata,
-    ) as execute_with_metadata:
+        "open_query_stream",
+        wraps=executor.open_query_stream,
+    ) as open_query_stream:
         book = await Book.objects.acreate(name="Created")
         book.name = "Saved"
         await book.asave(update_fields=["name"])
@@ -533,7 +554,7 @@ async def test_django_acreate_and_asave_execute_through_native_backend(
     saved = await Book.objects.aget(pk=book.pk)
     assert book.pk is not None
     assert saved.name == "Saved"
-    assert execute_with_metadata.await_count == 2
+    assert open_query_stream.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -545,23 +566,23 @@ async def test_django_async_bulk_writes_execute_through_native_backend(
 
     with mock.patch.object(
         executor,
-        "execute_with_metadata",
-        wraps=executor.execute_with_metadata,
-    ) as execute_with_metadata:
+        "open_query_stream",
+        wraps=executor.open_query_stream,
+    ) as open_query_stream:
         created = await Book.objects.abulk_create(books, batch_size=2)
 
     assert created == books
     assert all(book.pk is not None for book in books)
-    assert execute_with_metadata.await_count == 2
+    assert open_query_stream.await_count == 2
 
     for book in books:
         book.name = f"Updated {book.name}"
 
     with mock.patch.object(
         executor,
-        "execute_with_metadata",
-        wraps=executor.execute_with_metadata,
-    ) as execute_with_metadata:
+        "open_query_stream",
+        wraps=executor.open_query_stream,
+    ) as open_query_stream:
         rows_updated = await Book.objects.abulk_update(
             books,
             ["name"],
@@ -574,7 +595,7 @@ async def test_django_async_bulk_writes_execute_through_native_backend(
     ]
     assert rows_updated == 3
     assert names == ["Updated First", "Updated Second", "Updated Third"]
-    assert execute_with_metadata.await_count == 2
+    assert open_query_stream.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -692,13 +713,13 @@ async def test_django_arefresh_from_db_executes_through_native_backend(django_bo
 
     with mock.patch.object(
         executor,
-        "execute_with_metadata",
-        wraps=executor.execute_with_metadata,
-    ) as execute_with_metadata:
+        "open_query_stream",
+        wraps=executor.open_query_stream,
+    ) as open_query_stream:
         await django_book.arefresh_from_db(fields=["name"])
 
     assert django_book.name == "Refreshed"
-    execute_with_metadata.assert_awaited_once()
+    open_query_stream.assert_awaited_once()
 
     with pytest.raises(Book.DoesNotExist):
         await django_book.arefresh_from_db(
@@ -927,9 +948,9 @@ async def test_django_async_prefetch_uses_native_backend(transactional_db):
 
     with mock.patch.object(
         executor,
-        "execute_with_metadata",
-        wraps=executor.execute_with_metadata,
-    ) as execute_with_metadata:
+        "open_query_stream",
+        wraps=executor.open_query_stream,
+    ) as open_query_stream:
         articles = [
             article
             async for article in Article.objects.order_by("title").prefetch_related(
@@ -942,7 +963,7 @@ async def test_django_async_prefetch_uses_native_backend(transactional_db):
         ]
 
     assert tag_names == [["first", "second"], ["second"]]
-    assert execute_with_metadata.await_count == 2
+    assert open_query_stream.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -988,9 +1009,9 @@ async def test_django_async_prefetch_preserves_reverse_foreign_key_cache(
 
     with mock.patch.object(
         executor,
-        "execute_with_metadata",
-        wraps=executor.execute_with_metadata,
-    ) as execute_with_metadata:
+        "open_query_stream",
+        wraps=executor.open_query_stream,
+    ) as open_query_stream:
         fetched_parent = await DeletionParent.objects.prefetch_related(
             "cascadechild_set"
         ).aget(pk=parent.pk)
@@ -998,7 +1019,7 @@ async def test_django_async_prefetch_preserves_reverse_foreign_key_cache(
         child_parent = children[0].parent
 
     assert child_parent is fetched_parent
-    assert execute_with_metadata.await_count == 2
+    assert open_query_stream.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -1011,14 +1032,14 @@ async def test_django_aprefetch_related_objects_uses_native_backend(transactiona
 
     with mock.patch.object(
         executor,
-        "execute_with_metadata",
-        wraps=executor.execute_with_metadata,
-    ) as execute_with_metadata:
+        "open_query_stream",
+        wraps=executor.open_query_stream,
+    ) as open_query_stream:
         await aprefetch_related_objects(articles, "tags")
         tags = [item async for item in articles[0].tags.all()]
 
     assert tags == [tag]
-    execute_with_metadata.assert_awaited_once()
+    open_query_stream.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1028,25 +1049,25 @@ async def test_django_content_type_async_manager_uses_native_backend(transaction
 
     with mock.patch.object(
         executor,
-        "execute_with_metadata",
-        wraps=executor.execute_with_metadata,
-    ) as execute_with_metadata:
+        "open_query_stream",
+        wraps=executor.open_query_stream,
+    ) as open_query_stream:
         content_type = await ContentType.objects.aget_for_model(GenericOwner)
 
     assert content_type.model_class() is GenericOwner
-    assert execute_with_metadata.await_count == 1
+    assert open_query_stream.await_count == 1
 
     with mock.patch.object(
         executor,
-        "execute_with_metadata",
-        wraps=executor.execute_with_metadata,
-    ) as execute_with_metadata:
+        "open_query_stream",
+        wraps=executor.open_query_stream,
+    ) as open_query_stream:
         cached_by_model = await ContentType.objects.aget_for_model(GenericOwner)
         cached_by_id = await ContentType.objects.aget_for_id(content_type.pk)
 
     assert cached_by_model is content_type
     assert cached_by_id is content_type
-    execute_with_metadata.assert_not_awaited()
+    open_query_stream.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1059,13 +1080,13 @@ async def test_django_generic_relation_manager_access_does_not_query_database(
 
     with mock.patch.object(
         executor,
-        "execute_with_metadata",
-        wraps=executor.execute_with_metadata,
-    ) as execute_with_metadata:
+        "open_query_stream",
+        wraps=executor.open_query_stream,
+    ) as open_query_stream:
         manager = owner.notes
 
     assert manager.instance is owner
-    execute_with_metadata.assert_not_awaited()
+    open_query_stream.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1127,9 +1148,9 @@ async def test_django_async_prefetch_supports_generic_relations(transactional_db
 
     with mock.patch.object(
         executor,
-        "execute_with_metadata",
-        wraps=executor.execute_with_metadata,
-    ) as execute_with_metadata:
+        "open_query_stream",
+        wraps=executor.open_query_stream,
+    ) as open_query_stream:
         owners = [
             owner
             async for owner in GenericOwner.objects.order_by("name").prefetch_related(
@@ -1141,7 +1162,7 @@ async def test_django_async_prefetch_supports_generic_relations(transactional_db
         ]
 
     assert note_texts == [["first-note"], ["second-note"]]
-    assert execute_with_metadata.await_count == 2
+    assert open_query_stream.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -1157,9 +1178,9 @@ async def test_django_async_prefetch_supports_generic_foreign_keys(
 
     with mock.patch.object(
         executor,
-        "execute_with_metadata",
-        wraps=executor.execute_with_metadata,
-    ) as execute_with_metadata:
+        "open_query_stream",
+        wraps=executor.open_query_stream,
+    ) as open_query_stream:
         notes = [
             note
             async for note in GenericNote.objects.order_by("text").prefetch_related(
@@ -1170,7 +1191,7 @@ async def test_django_async_prefetch_supports_generic_foreign_keys(
 
     assert notes == [other_note, owner_note]
     assert content_objects == [other, owner]
-    assert execute_with_metadata.await_count == 5
+    assert open_query_stream.await_count == 5
 
 
 @pytest.mark.asyncio
@@ -1208,9 +1229,9 @@ async def test_django_raw_query_executes_through_native_backend(transactional_db
 
     with mock.patch.object(
         executor,
-        "execute_with_metadata",
-        wraps=executor.execute_with_metadata,
-    ) as execute_with_metadata:
+        "open_query_stream",
+        wraps=executor.open_query_stream,
+    ) as open_query_stream:
         books = [
             book
             async for book in Book.objects.raw(
@@ -1222,7 +1243,7 @@ async def test_django_raw_query_executes_through_native_backend(transactional_db
 
     assert [book.name for book in books] == ["Django"]
     assert books[0].label == "Django"
-    execute_with_metadata.assert_awaited_once()
+    open_query_stream.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1239,13 +1260,13 @@ async def test_django_raw_query_with_named_parameters_uses_native_backend(
 
     with mock.patch.object(
         executor,
-        "execute_with_metadata",
-        wraps=executor.execute_with_metadata,
-    ) as execute_with_metadata:
+        "open_query_stream",
+        wraps=executor.open_query_stream,
+    ) as open_query_stream:
         books = [book async for book in Book.objects.raw(sql, params)]
 
     assert [book.name for book in books] == ["Django"]
-    execute_with_metadata.assert_awaited_once_with(sql=sql, params=params)
+    open_query_stream.assert_awaited_once_with(sql=sql, params=params)
 
 
 @pytest.mark.asyncio
@@ -1258,9 +1279,9 @@ async def test_django_raw_query_supports_prefetch_and_empty_results(transactiona
 
     with mock.patch.object(
         executor,
-        "execute_with_metadata",
-        wraps=executor.execute_with_metadata,
-    ) as execute_with_metadata:
+        "open_query_stream",
+        wraps=executor.open_query_stream,
+    ) as open_query_stream:
         articles = [
             item
             async for item in Article.objects.raw(sql, [article.pk]).prefetch_related(
@@ -1272,7 +1293,7 @@ async def test_django_raw_query_supports_prefetch_and_empty_results(transactiona
 
     assert tags == [tag]
     assert missing == []
-    assert execute_with_metadata.await_count == 3
+    assert open_query_stream.await_count == 3
 
 
 @pytest.mark.asyncio
