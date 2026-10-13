@@ -2152,3 +2152,42 @@ async def test_dropping_query_stream_releases_pool_connection(
         ) == [[1]]
     finally:
         await _native.close_pools()
+
+
+@pytest.mark.asyncio
+async def test_query_stream_releases_connection_after_postgres_error(
+    postgres_database_url,
+):
+    await _native.close_pools()
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        wait_timeout_ms=2000,
+    )
+
+    try:
+        stream, _, _ = await _native.open_query_stream(
+            pool=pool,
+            sql="""
+                SELECT value::BIGINT
+                FROM generate_series(1, 10000) AS value
+
+                UNION ALL
+
+                SELECT (1 / (random() * 0)::BIGINT)::BIGINT
+                FROM pg_sleep(1)
+            """,
+        )
+
+        with pytest.raises(
+            _native.PostgresDatabaseError,
+            match="division by zero",
+        ):
+            await _native.fetch_query_stream(stream, 10001)
+
+        assert await _native.execute(
+            pool=pool,
+            sql="SELECT 2::BIGINT",
+        ) == [[2]]
+    finally:
+        await _native.close_pools()
