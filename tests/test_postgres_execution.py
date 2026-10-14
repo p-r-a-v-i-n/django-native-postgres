@@ -2320,3 +2320,37 @@ async def test_close_pool_allows_active_query_stream_to_finish(
         assert await _native.fetch_query_stream(stream, 2) == []
     finally:
         await _native.close_pools()
+
+
+@pytest.mark.asyncio
+async def test_transaction_query_stream_fetches_rows(postgres_database_url):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        wait_timeout_ms=1000,
+    )
+    transaction = await _native.begin_transaction(pool)
+
+    await _native.execute_transaction(
+        transaction=transaction,
+        sql="CREATE TEMP TABLE transaction_stream (value BIGINT)",
+    )
+    await _native.execute_transaction(
+        transaction=transaction,
+        sql="INSERT INTO transaction_stream VALUES (1), (2), (3)",
+    )
+
+    stream, rows_affected, columns = (
+        await _native.open_transaction_query_stream(
+            transaction=transaction,
+            sql="SELECT value FROM transaction_stream ORDER BY value",
+        )
+    )
+
+    assert rows_affected is None
+    assert columns == ["value"]
+    assert await _native.fetch_query_stream(stream, 2) == [[1], [2]]
+    assert await _native.fetch_query_stream(stream, 2) == [[3]]
+    assert await _native.fetch_query_stream(stream, 2) == []
+
+    await _native.rollback_transaction(transaction)
