@@ -83,9 +83,9 @@ suite, but the project still has the following release limitations:
 - The native async ORM contract exists only in the project's Django fork.
 - Query parameters currently support only strings, integers, and `None`.
 - Result decoding currently supports text and integer PostgreSQL types.
-- Async cursor iteration outside transactions uses bounded native batches.
-  `afetchall()`, direct eager execution, and transaction-bound queries still
-  collect complete results.
+- Async cursor iteration uses bounded native batches both outside and inside
+  native transactions. `afetchall()` and direct eager execution still collect
+  complete results.
 - Native PostgreSQL connections currently use `NoTls`.
 - The project has not yet completed Django's PostgreSQL compatibility suite or
   a supported platform and PostgreSQL version matrix.

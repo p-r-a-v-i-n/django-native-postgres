@@ -89,16 +89,15 @@ transaction methods used by the Django fork.
 - `afetchmany()`; and
 - `afetchall()`.
 
-Outside a native transaction, `aexecute()` opens a Rust-owned query stream.
-Each cursor fetch requests a bounded row batch, and closing or replacing the
-cursor closes its current stream. `afetchall()` repeatedly fetches bounded
-native batches but still builds one complete Python list.
+`aexecute()` opens a Rust-owned query stream. Each cursor fetch requests a
+bounded row batch, and closing or replacing the cursor closes its current
+stream. `afetchall()` repeatedly fetches bounded native batches but still
+builds one complete Python list.
 
-Inside a native transaction, the executor currently uses the eager transaction
-result API. This keeps the query on the transaction actor's pinned connection,
-but the complete decoded result is buffered before cursor fetching begins.
-Transaction-owned streaming requires integration with that actor and remains
-future work.
+Outside a transaction, the stream actor owns a pooled connection. Inside a
+native transaction, the transaction actor owns both the transaction and its
+active row stream. It serializes stream and transaction commands on the pinned
+connection.
 
 ## PyO3 boundary
 
@@ -210,7 +209,7 @@ ORM operations are not moved onto the Tokio runtime by this project.
 The main areas still being developed are:
 
 1. support for more PostgreSQL parameter and result types;
-2. transaction-owned result streaming and broader memory validation;
+2. broader result-stream memory validation;
 3. TLS and additional PostgreSQL connection options;
 4. session initialization and reset behavior;
 5. broader Django compatibility testing; and

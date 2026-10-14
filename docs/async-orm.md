@@ -129,18 +129,16 @@ async for book in Book.objects.aiterator(chunk_size=500):
     await process(book)
 ```
 
-Outside a native transaction, the cursor opens a Rust-owned query stream and
-requests at most `chunk_size` rows for each fetch. Rust decodes the requested
-batch and retains at most one lookahead row. The stream keeps one pool
-connection until it is exhausted, closed, cancelled, or dropped. A slow Python
-consumer therefore does not cause this project to collect the complete decoded
-result before returning the first batch.
+The cursor opens a Rust-owned query stream and requests at most `chunk_size`
+rows for each fetch. Rust decodes the requested batch and retains at most one
+lookahead row. Outside a transaction, the stream keeps one pool connection
+until cleanup. Inside a native transaction, the transaction actor serves the
+stream on its pinned connection. A slow Python consumer therefore does not
+cause this project to collect the complete decoded result before returning the
+first batch.
 
 `afetchall()` still builds a complete Python list because that is its API.
-Direct eager execution methods also return complete result lists. Inside
-`transaction.atomic()`, query results currently use the eager transaction path
-to remain on the transaction's pinned connection; bounded transaction-owned
-streaming is separate future work.
+Direct eager execution methods also return complete result lists.
 
 The bounded fetch contract controls the rows decoded and returned by this
 project per batch. It is not an exact memory bound for PostgreSQL or
