@@ -100,11 +100,13 @@ class NativeQueryStream:
         rows: list[list[str | int | None]] | None,
         rows_affected: int | None,
         columns: list[str],
+        on_error: Callable[[], None] | None = None,
     ):
         self._handle = handle
         self._rows = rows
         self._position = 0
         self._closed = False
+        self._on_error = on_error
         self.rows_affected = rows_affected
         self.columns = columns
 
@@ -115,9 +117,14 @@ class NativeQueryStream:
             raise ValueError("query stream fetch size must be greater than zero")
 
         if self._handle is not None:
-            return await _translate_database_error(
-                _native.fetch_query_stream(self._handle, size)
-            )
+            try:
+                return await _translate_database_error(
+                    _native.fetch_query_stream(self._handle, size)
+                )
+            except BaseException:
+                if self._on_error is not None:
+                    self._on_error()
+                raise
 
         if self._rows is None:
             raise RuntimeError("Query stream has no result source")
@@ -134,7 +141,14 @@ class NativeQueryStream:
         self._rows = None
 
         if self._handle is not None:
-            await _translate_database_error(_native.close_query_stream(self._handle))
+            try:
+                await _translate_database_error(
+                    _native.close_query_stream(self._handle)
+                )
+            except BaseException:
+                if self._on_error is not None:
+                    self._on_error()
+                raise
             self._handle = None
 
 
@@ -381,6 +395,7 @@ class NativeTransaction:
             rows=None,
             rows_affected=rows_affected,
             columns=columns,
+            on_error=self._mark_for_rollback,
         )
 
     async def __aexit__(
