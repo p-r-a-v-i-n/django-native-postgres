@@ -122,6 +122,8 @@ class NativeQueryStream:
                     _native.fetch_query_stream(self._handle, size)
                 )
             except BaseException:
+                self._closed = True
+                self._handle = None
                 if self._on_error is not None:
                     self._on_error()
                 raise

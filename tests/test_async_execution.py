@@ -882,6 +882,10 @@ async def test_transaction_stream_fetch_error_marks_transaction_for_rollback():
             new=mock.AsyncMock(side_effect=asyncio.CancelledError),
         ),
         mock.patch(
+            "django_native_postgres.executor._native.close_query_stream",
+            new=mock.AsyncMock(),
+        ) as close_query_stream,
+        mock.patch(
             "django_native_postgres.executor._native.commit_transaction",
             new=mock.AsyncMock(),
         ) as commit_transaction,
@@ -899,9 +903,11 @@ async def test_transaction_stream_fetch_error_marks_transaction_for_rollback():
                 await stream.fetchmany(1)
 
             assert transaction.needs_rollback
+            await stream.close()
 
     commit_transaction.assert_not_awaited()
     rollback_transaction.assert_awaited_once_with(transaction_handle)
+    close_query_stream.assert_not_awaited()
 
 
 @pytest.mark.asyncio
