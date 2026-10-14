@@ -105,12 +105,10 @@ The command channel is bounded, and Rust decodes at most the requested batch
 plus one lookahead row. This provides application-level backpressure without
 collecting the complete decoded result before Python can consume it.
 
-Inside a native transaction, the transaction actor also owns the active row
-stream. Fetch, close, execute, commit, and rollback remain serialized on the
-pinned transaction connection. Closing an unfinished transaction stream drains
-its remaining rows instead of cancelling the PostgreSQL query, because query
-cancellation would leave the transaction needing rollback. Cancelling a fetch
-does cancel the query and marks the Python transaction rollback-only.
+The transaction actor serializes stream and transaction operations on its
+pinned connection. Closing an unfinished stream drains its remaining rows to
+keep the transaction usable. Cancelling a fetch cancels the query and marks the
+transaction rollback-only.
 
 ## Transaction connection affinity
 

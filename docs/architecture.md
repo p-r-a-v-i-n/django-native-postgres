@@ -89,15 +89,10 @@ transaction methods used by the Django fork.
 - `afetchmany()`; and
 - `afetchall()`.
 
-`aexecute()` opens a Rust-owned query stream. Each cursor fetch requests a
-bounded row batch, and closing or replacing the cursor closes its current
-stream. `afetchall()` repeatedly fetches bounded native batches but still
-builds one complete Python list.
-
-Outside a transaction, the stream actor owns a pooled connection. Inside a
-native transaction, the transaction actor owns both the transaction and its
-active row stream. It serializes stream and transaction commands on the pinned
-connection.
+`aexecute()` opens a Rust-owned query stream. Fetches return bounded batches,
+although `afetchall()` still collects all rows into one Python list. Outside a
+transaction, the stream owns a pooled connection. Inside a transaction, the
+transaction actor owns the stream and its pinned connection.
 
 ## PyO3 boundary
 
