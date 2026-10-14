@@ -12,7 +12,7 @@ use std::pin::Pin;
 use std::process;
 use tokio::sync::{mpsc, oneshot};
 use tokio_postgres::types::{ToSql, Type};
-use tokio_postgres::{NoTls, Row, RowStream};
+use tokio_postgres::{CancelToken, GenericClient, NoTls, Row, RowStream};
 
 enum OperationOutcome<T> {
     Completed(Result<T, tokio_postgres::Error>),
@@ -98,6 +98,126 @@ pub(crate) struct QueryStreamOpenResult {
     pub(crate) columns: QueryColumns,
 }
 
+pub(crate) struct StartedQueryStream {
+    pub(crate) rows: RowStream,
+    pub(crate) columns: QueryColumns,
+}
+
+pub(crate) async fn start_on_client<C>(
+    client: &C,
+    cancel_token: CancelToken,
+    sql: &str,
+    params: QueryParameters,
+    cancellation: &mut oneshot::Receiver<()>,
+) -> Result<StartedQueryStream, NativeError>
+where
+    C: GenericClient + Sync,
+{
+    let (postgres_sql, params) = params.prepare(sql)?;
+    let parameter_types: Vec<Type> = params
+        .iter()
+        .map(|parameter| parameter.postgres_type())
+        .collect();
+
+    let prepare_outcome = {
+        let prepare = client.prepare_typed(&postgres_sql, &parameter_types);
+        tokio::pin!(prepare);
+
+        tokio::select! {
+            biased;
+            _ = &mut *cancellation => {
+                let cancellation = cancel_token.cancel_query(NoTls).await;
+                let operation = prepare.as_mut().await;
+                OperationOutcome::Cancelled {
+                    cancellation,
+                    operation,
+                }
+            }
+            result = &mut prepare => OperationOutcome::Completed(result)
+        }
+    };
+
+    let statement = match prepare_outcome {
+        OperationOutcome::Completed(Ok(statement)) => statement,
+        OperationOutcome::Completed(Err(error)) => {
+            return Err(NativeError::PostgresQuery(error));
+        }
+        OperationOutcome::Cancelled {
+            cancellation,
+            operation,
+        } => {
+            let connection_can_be_reused = cancellation.is_ok()
+                && match operation {
+                    Ok(_) => false,
+                    Err(ref error) => postgres::query_error_confirms_cancellation(error),
+                };
+
+            return match cancellation {
+                Ok(()) => Err(NativeError::QueryCancelled {
+                    connection_can_be_reused,
+                }),
+                Err(error) => Err(NativeError::PostgresCancel(error)),
+            };
+        }
+    };
+
+    let columns = statement
+        .columns()
+        .iter()
+        .map(|column| column.name().to_string())
+        .collect();
+    let postgres_params: Vec<&(dyn ToSql + Sync)> = params
+        .iter()
+        .map(|parameter| parameter.as_postgres())
+        .collect();
+    let query_outcome = {
+        let query = client.query_raw(&statement, postgres_params);
+        tokio::pin!(query);
+
+        tokio::select! {
+            biased;
+            _ = &mut *cancellation => {
+                let cancellation = cancel_token.cancel_query(NoTls).await;
+                let operation = query.as_mut().await;
+                OperationOutcome::Cancelled {
+                    cancellation,
+                    operation,
+                }
+            }
+            result = &mut query => OperationOutcome::Completed(result)
+        }
+    };
+
+    let rows = match query_outcome {
+        OperationOutcome::Completed(Ok(rows)) => rows,
+        OperationOutcome::Completed(Err(error)) => {
+            return Err(NativeError::PostgresQuery(error));
+        }
+        OperationOutcome::Cancelled {
+            cancellation,
+            operation,
+        } => {
+            let operation_allows_reuse = match operation {
+                Ok(rows) => {
+                    let mut rows = Box::pin(rows);
+                    drain_cancelled_rows(rows.as_mut()).await
+                }
+                Err(ref error) => postgres::query_error_confirms_cancellation(error),
+            };
+            let connection_can_be_reused = cancellation.is_ok() && operation_allows_reuse;
+
+            return match cancellation {
+                Ok(()) => Err(NativeError::QueryCancelled {
+                    connection_can_be_reused,
+                }),
+                Err(error) => Err(NativeError::PostgresCancel(error)),
+            };
+        }
+    };
+
+    Ok(StartedQueryStream { rows, columns })
+}
+
 pub(crate) async fn open(
     pool: &Pool,
     sql: String,
@@ -116,117 +236,26 @@ pub(crate) async fn open(
         }
     };
 
-    let (postgres_sql, params) = params.prepare(&sql)?;
-    let parameter_types: Vec<Type> = params
-        .iter()
-        .map(|parameter| parameter.postgres_type())
-        .collect();
-
-    let prepare_outcome = {
-        let prepare = client.prepare_typed(&postgres_sql, &parameter_types);
-        tokio::pin!(prepare);
-
-        tokio::select! {
-            biased;
-            _ = &mut cancellation => {
-                let cancellation = client.cancel_token().cancel_query(NoTls).await;
-                let operation = prepare.as_mut().await;
-                OperationOutcome::Cancelled {
-                    cancellation,
-                    operation,
-                }
+    let cancel_token = client.cancel_token();
+    let StartedQueryStream { rows, columns } =
+        match start_on_client(&**client, cancel_token, &sql, params, &mut cancellation).await {
+            Ok(started) => started,
+            Err(error) => {
+                let connection_can_be_reused = !client.is_closed()
+                    && match &error {
+                        NativeError::PostgresQuery(error) => {
+                            postgres::query_error_allows_connection_reuse(error)
+                        }
+                        NativeError::PostgresCancel(_) => false,
+                        NativeError::QueryCancelled {
+                            connection_can_be_reused,
+                        } => *connection_can_be_reused,
+                        _ => true,
+                    };
+                discard_if_needed(client, connection_can_be_reused);
+                return Err(error);
             }
-            result = &mut prepare => OperationOutcome::Completed(result)
-        }
-    };
-
-    let statement = match prepare_outcome {
-        OperationOutcome::Completed(Ok(statement)) => statement,
-        OperationOutcome::Completed(Err(error)) => {
-            let connection_can_be_reused =
-                !client.is_closed() && postgres::query_error_allows_connection_reuse(&error);
-            discard_if_needed(client, connection_can_be_reused);
-            return Err(NativeError::PostgresQuery(error));
-        }
-        OperationOutcome::Cancelled {
-            cancellation,
-            operation,
-        } => {
-            let connection_can_be_reused = !client.is_closed()
-                && cancellation.is_ok()
-                && match operation {
-                    Ok(_) => false,
-                    Err(ref error) => postgres::query_error_confirms_cancellation(error),
-                };
-            discard_if_needed(client, connection_can_be_reused);
-
-            return match cancellation {
-                Ok(()) => Err(NativeError::QueryCancelled {
-                    connection_can_be_reused,
-                }),
-                Err(error) => Err(NativeError::PostgresCancel(error)),
-            };
-        }
-    };
-
-    let columns: QueryColumns = statement
-        .columns()
-        .iter()
-        .map(|column| column.name().to_string())
-        .collect();
-    let postgres_params: Vec<&(dyn ToSql + Sync)> = params
-        .iter()
-        .map(|parameter| parameter.as_postgres())
-        .collect();
-    let query_outcome = {
-        let query = client.query_raw(&statement, postgres_params);
-        tokio::pin!(query);
-
-        tokio::select! {
-            biased;
-            _ = &mut cancellation => {
-                let cancellation = client.cancel_token().cancel_query(NoTls).await;
-                let operation = query.as_mut().await;
-                OperationOutcome::Cancelled {
-                    cancellation,
-                    operation,
-                }
-            }
-            result = &mut query => OperationOutcome::Completed(result)
-        }
-    };
-
-    let rows = match query_outcome {
-        OperationOutcome::Completed(Ok(rows)) => rows,
-        OperationOutcome::Completed(Err(error)) => {
-            let connection_can_be_reused =
-                !client.is_closed() && postgres::query_error_allows_connection_reuse(&error);
-            discard_if_needed(client, connection_can_be_reused);
-            return Err(NativeError::PostgresQuery(error));
-        }
-        OperationOutcome::Cancelled {
-            cancellation,
-            operation,
-        } => {
-            let operation_allows_reuse = match operation {
-                Ok(rows) => {
-                    let mut rows = Box::pin(rows);
-                    drain_cancelled_rows(rows.as_mut()).await
-                }
-                Err(ref error) => postgres::query_error_confirms_cancellation(error),
-            };
-            let connection_can_be_reused =
-                !client.is_closed() && cancellation.is_ok() && operation_allows_reuse;
-            discard_if_needed(client, connection_can_be_reused);
-
-            return match cancellation {
-                Ok(()) => Err(NativeError::QueryCancelled {
-                    connection_can_be_reused,
-                }),
-                Err(error) => Err(NativeError::PostgresCancel(error)),
-            };
-        }
-    };
+        };
 
     if columns.is_empty() {
         return finish_non_row_query(client, rows, cancellation).await;
