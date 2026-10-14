@@ -2433,3 +2433,71 @@ async def test_rollback_closes_active_transaction_query_stream(
         match="PostgreSQL query stream handle is closed",
     ):
         await _native.fetch_query_stream(stream, 1)
+
+
+@pytest.mark.asyncio
+async def test_cancelling_transaction_stream_fetch_allows_rollback(
+    postgres_database_url,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        wait_timeout_ms=1000,
+    )
+    transaction = await _native.begin_transaction(pool)
+    stream, _, _ = await _native.open_transaction_query_stream(
+        transaction=transaction,
+        sql="""
+            SELECT value::BIGINT
+            FROM generate_series(1, 10000) AS value
+
+            UNION ALL
+
+            SELECT 10001::BIGINT
+            FROM pg_sleep(5)
+        """,
+    )
+    fetch_task = asyncio.create_task(_native.fetch_query_stream(stream, 10001))
+
+    await asyncio.sleep(0.05)
+    assert fetch_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await fetch_task
+
+    await asyncio.wait_for(
+        _native.rollback_transaction(transaction),
+        timeout=1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_transaction_stream_decode_error_keeps_transaction_usable(
+    postgres_database_url,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        wait_timeout_ms=1000,
+    )
+    transaction = await _native.begin_transaction(pool)
+    stream, _, _ = await _native.open_transaction_query_stream(
+        transaction=transaction,
+        sql="""
+            SELECT point(value, value)
+            FROM generate_series(1, 100) AS value
+        """,
+    )
+
+    with pytest.raises(
+        _native.PostgresNotSupportedError,
+        match="unsupported PostgreSQL type point at column 0",
+    ):
+        await _native.fetch_query_stream(stream, 100)
+
+    assert await _native.execute_transaction(
+        transaction=transaction,
+        sql="SELECT 101::BIGINT",
+    ) == [[101]]
+
+    await _native.rollback_transaction(transaction)
