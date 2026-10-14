@@ -105,6 +105,11 @@ The command channel is bounded, and Rust decodes at most the requested batch
 plus one lookahead row. This provides application-level backpressure without
 collecting the complete decoded result before Python can consume it.
 
+The transaction actor serializes stream and transaction operations on its
+pinned connection. Closing an unfinished stream drains its remaining rows to
+keep the transaction usable. Cancelling a fetch cancels the query and marks the
+transaction rollback-only.
+
 ## Transaction connection affinity
 
 A transaction must use one physical connection from begin through commit or

@@ -106,6 +106,22 @@ async fn execute_transaction_with_metadata(
         .map_err(to_python_error)
 }
 
+#[pyfunction(signature = (transaction, sql, params=None))]
+async fn open_transaction_query_stream(
+    transaction: Py<transaction::TransactionHandle>,
+    sql: String,
+    params: Option<parameter::QueryParameters>,
+) -> PyResult<(
+    query_stream::QueryStreamHandle,
+    Option<u64>,
+    postgres::QueryColumns,
+)> {
+    transaction::open_query_stream(transaction.get().clone(), sql, params.unwrap_or_default())
+        .await
+        .map(|result| (result.handle, result.rows_affected, result.columns))
+        .map_err(to_python_error)
+}
+
 #[pyfunction]
 async fn commit_transaction(transaction: Py<transaction::TransactionHandle>) -> PyResult<()> {
     transaction::commit(transaction.get().clone())
@@ -240,6 +256,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(execute_transaction, module)?)?;
     module.add_function(wrap_pyfunction!(execute_transaction_result, module)?)?;
     module.add_function(wrap_pyfunction!(execute_transaction_with_metadata, module)?)?;
+    module.add_function(wrap_pyfunction!(open_transaction_query_stream, module)?)?;
     module.add_function(wrap_pyfunction!(commit_transaction, module)?)?;
     module.add_function(wrap_pyfunction!(rollback_transaction, module)?)?;
     module.add_function(wrap_pyfunction!(open_query_stream, module)?)?;

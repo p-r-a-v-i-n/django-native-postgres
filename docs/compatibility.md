@@ -67,14 +67,14 @@ boundary. See [Supported PostgreSQL values](supported-types.md).
 
 ### Result streaming
 
-Async cursor iteration outside transactions uses a native query-stream handle
-and fetches bounded decoded batches. The stream pins one pooled connection
-until completion or cleanup.
+Async cursor iteration uses a native query-stream handle and fetches bounded
+decoded batches. Outside a transaction, the stream pins one pooled connection.
+Inside `transaction.atomic()`, the transaction actor owns the stream on its
+already pinned connection.
 
-`afetchall()`, direct eager execution methods, and queries inside
-`transaction.atomic()` still collect complete results. Transaction-owned
-streaming remains future work. The batch boundary is not an exact memory bound
-for PostgreSQL or `tokio-postgres` internal protocol buffers.
+`afetchall()` and direct eager execution methods still collect complete
+results. The batch boundary is not an exact memory bound for PostgreSQL or
+`tokio-postgres` internal protocol buffers.
 
 ### TLS
 

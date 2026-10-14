@@ -47,5 +47,4 @@ The following guides will be added as the documentation work continues:
 The project can be evaluated from source, but it is not ready to be presented
 as a production backend. The first package release should be explicitly marked
 as experimental or pre-alpha and must document the required Django fork,
-limited value support, remaining transaction-bound result buffering, and lack
-of TLS.
+limited value support, and lack of TLS.

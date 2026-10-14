@@ -797,10 +797,10 @@ async def test_executor_opens_native_query_stream_outside_transaction():
 
 
 @pytest.mark.asyncio
-async def test_executor_keeps_query_stream_on_active_transaction():
+async def test_executor_opens_query_stream_on_active_transaction():
     pool = object()
-    handle = object()
-    transaction_result = ([[1], [2], [3]], 3, ["value"])
+    transaction_handle = object()
+    stream_handle = object()
 
     with (
         mock.patch(
@@ -809,16 +809,25 @@ async def test_executor_keeps_query_stream_on_active_transaction():
         ),
         mock.patch(
             "django_native_postgres.executor._native.begin_transaction",
-            new=mock.AsyncMock(return_value=handle),
+            new=mock.AsyncMock(return_value=transaction_handle),
         ),
         mock.patch(
             "django_native_postgres.executor._native.execute_transaction_with_metadata",
-            new=mock.AsyncMock(return_value=transaction_result),
+            new=mock.AsyncMock(return_value=([[1], [2], [3]], 3, ["value"])),
         ) as execute_transaction_with_metadata,
         mock.patch(
-            "django_native_postgres.executor._native.open_query_stream",
+            "django_native_postgres.executor._native.open_transaction_query_stream",
+            new=mock.AsyncMock(return_value=(stream_handle, None, ["value"])),
+            create=True,
+        ) as open_transaction_query_stream,
+        mock.patch(
+            "django_native_postgres.executor._native.fetch_query_stream",
+            new=mock.AsyncMock(side_effect=[[[1], [2]], [[3]]]),
+        ) as fetch_query_stream,
+        mock.patch(
+            "django_native_postgres.executor._native.close_query_stream",
             new=mock.AsyncMock(),
-        ) as open_query_stream,
+        ) as close_query_stream,
         mock.patch(
             "django_native_postgres.executor._native.commit_transaction",
             new=mock.AsyncMock(),
@@ -830,15 +839,75 @@ async def test_executor_keeps_query_stream_on_active_transaction():
             stream = await executor.open_query_stream("SELECT value FROM example")
             first_batch = await stream.fetchmany(2)
             second_batch = await stream.fetchmany(2)
+            await stream.close()
 
     assert first_batch == [[1], [2]]
     assert second_batch == [[3]]
-    execute_transaction_with_metadata.assert_awaited_once_with(
-        transaction=handle,
+    open_transaction_query_stream.assert_awaited_once_with(
+        transaction=transaction_handle,
         sql="SELECT value FROM example",
         params=None,
     )
-    open_query_stream.assert_not_awaited()
+    fetch_query_stream.assert_has_awaits(
+        [
+            mock.call(stream_handle, 2),
+            mock.call(stream_handle, 2),
+        ]
+    )
+    close_query_stream.assert_awaited_once_with(stream_handle)
+    execute_transaction_with_metadata.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_transaction_stream_fetch_error_marks_transaction_for_rollback():
+    pool = object()
+    transaction_handle = object()
+    stream_handle = object()
+
+    with (
+        mock.patch(
+            "django_native_postgres.executor._native.create_pool",
+            return_value=pool,
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.begin_transaction",
+            new=mock.AsyncMock(return_value=transaction_handle),
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.open_transaction_query_stream",
+            new=mock.AsyncMock(return_value=(stream_handle, None, ["value"])),
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.fetch_query_stream",
+            new=mock.AsyncMock(side_effect=asyncio.CancelledError),
+        ),
+        mock.patch(
+            "django_native_postgres.executor._native.close_query_stream",
+            new=mock.AsyncMock(),
+        ) as close_query_stream,
+        mock.patch(
+            "django_native_postgres.executor._native.commit_transaction",
+            new=mock.AsyncMock(),
+        ) as commit_transaction,
+        mock.patch(
+            "django_native_postgres.executor._native.rollback_transaction",
+            new=mock.AsyncMock(),
+        ) as rollback_transaction,
+    ):
+        executor = NativeExecutor(database_url="postgresql://example")
+
+        async with executor.transaction() as transaction:
+            stream = await executor.open_query_stream("SELECT value FROM example")
+
+            with pytest.raises(asyncio.CancelledError):
+                await stream.fetchmany(1)
+
+            assert transaction.needs_rollback
+            await stream.close()
+
+    commit_transaction.assert_not_awaited()
+    rollback_transaction.assert_awaited_once_with(transaction_handle)
+    close_query_stream.assert_not_awaited()
 
 
 @pytest.mark.asyncio
