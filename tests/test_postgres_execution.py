@@ -2340,11 +2340,9 @@ async def test_transaction_query_stream_fetches_rows(postgres_database_url):
         sql="INSERT INTO transaction_stream VALUES (1), (2), (3)",
     )
 
-    stream, rows_affected, columns = (
-        await _native.open_transaction_query_stream(
-            transaction=transaction,
-            sql="SELECT value FROM transaction_stream ORDER BY value",
-        )
+    stream, rows_affected, columns = await _native.open_transaction_query_stream(
+        transaction=transaction,
+        sql="SELECT value FROM transaction_stream ORDER BY value",
     )
 
     assert rows_affected is None
@@ -2354,3 +2352,84 @@ async def test_transaction_query_stream_fetches_rows(postgres_database_url):
     assert await _native.fetch_query_stream(stream, 2) == []
 
     await _native.rollback_transaction(transaction)
+
+
+@pytest.mark.asyncio
+async def test_transaction_query_stream_reports_affected_rows(
+    postgres_database_url,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        wait_timeout_ms=1000,
+    )
+    transaction = await _native.begin_transaction(pool)
+
+    await _native.execute_transaction(
+        transaction=transaction,
+        sql="CREATE TEMP TABLE transaction_stream_write (value BIGINT)",
+    )
+    stream, rows_affected, columns = await _native.open_transaction_query_stream(
+        transaction=transaction,
+        sql="INSERT INTO transaction_stream_write VALUES (1), (2), (3)",
+    )
+
+    assert rows_affected == 3
+    assert columns == []
+    assert await _native.fetch_query_stream(stream, 1) == []
+
+    await _native.rollback_transaction(transaction)
+
+
+@pytest.mark.asyncio
+async def test_closing_transaction_query_stream_keeps_transaction_usable(
+    postgres_database_url,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        wait_timeout_ms=1000,
+    )
+    transaction = await _native.begin_transaction(pool)
+    stream, _, _ = await _native.open_transaction_query_stream(
+        transaction=transaction,
+        sql="SELECT value::BIGINT FROM generate_series(1, 100) AS value",
+    )
+
+    assert await _native.fetch_query_stream(stream, 1) == [[1]]
+    await _native.close_query_stream(stream)
+
+    assert await _native.execute_transaction(
+        transaction=transaction,
+        sql="SELECT 101::BIGINT",
+    ) == [[101]]
+
+    await _native.rollback_transaction(transaction)
+
+
+@pytest.mark.asyncio
+async def test_rollback_closes_active_transaction_query_stream(
+    postgres_database_url,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        wait_timeout_ms=1000,
+    )
+    transaction = await _native.begin_transaction(pool)
+    stream, _, _ = await _native.open_transaction_query_stream(
+        transaction=transaction,
+        sql="SELECT value::BIGINT FROM generate_series(1, 100) AS value",
+    )
+
+    assert await _native.fetch_query_stream(stream, 1) == [[1]]
+    await asyncio.wait_for(
+        _native.rollback_transaction(transaction),
+        timeout=1,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="PostgreSQL query stream handle is closed",
+    ):
+        await _native.fetch_query_stream(stream, 1)
