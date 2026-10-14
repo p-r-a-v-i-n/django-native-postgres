@@ -39,8 +39,8 @@ pub(crate) enum QueryStreamCommand {
 }
 
 pub(crate) struct QueryStreamFetchResult {
-    rows: QueryRows,
-    exhausted: bool,
+    pub(crate) rows: QueryRows,
+    pub(crate) exhausted: bool,
 }
 
 #[pyclass(frozen, skip_from_py_object)]
