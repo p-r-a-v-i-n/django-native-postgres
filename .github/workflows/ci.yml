@@ -120,3 +120,36 @@ jobs:
 
       - name: Run the complete test suite
         run: uv run --no-sync pytest
+
+  postgres-tls:
+    name: PostgreSQL TLS tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: "1.99.0"
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python development dependencies
+        run: uv sync --locked --all-groups --no-install-project
+
+      - name: Build the native extension
+        run: uv run --no-sync maturin develop --locked
+
+      - name: Run PostgreSQL TLS tests
+        run: tests/run_postgres_tls.sh

@@ -92,3 +92,6 @@ db-down:
 
 test-postgres *args: db-up
     @DJANGO_NATIVE_POSTGRES_TEST_DATABASE_URL="$DNP_TEST_DATABASE_URL" uv run --no-sync pytest -q {{ if args == "" { "tests/test_postgres_execution.py tests/test_django_postgres.py" } else { args } }}
+
+test-postgres-tls:
+    tests/run_postgres_tls.sh
