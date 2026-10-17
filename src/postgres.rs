@@ -82,10 +82,12 @@ pub(crate) fn create_pool(
     database_url: &str,
     pool_max_size: usize,
     pool_wait_timeout_ms: u64,
-    _ssl_mode: SslMode,
+    ssl_mode: SslMode,
     _ssl_root_cert: Option<&str>,
 ) -> Result<Pool, NativeError> {
-    let postgres_config = database_url.parse().map_err(NativeError::PostgresConnect)?;
+    let mut postgres_config: tokio_postgres::Config =
+        database_url.parse().map_err(NativeError::PostgresConnect)?;
+    postgres_config.ssl_mode(ssl_mode.postgres_mode());
     let manager = Manager::from_config(
         postgres_config,
         NoTls,

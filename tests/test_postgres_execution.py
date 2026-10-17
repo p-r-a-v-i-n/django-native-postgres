@@ -2523,3 +2523,22 @@ def test_create_pool_accepts_supported_ssl_modes(
         database_url=postgres_database_url,
         ssl_mode=ssl_mode,
     )
+
+
+@pytest.mark.asyncio
+async def test_ssl_mode_require_rejects_plaintext_server(
+    postgres_database_url,
+):
+    await _native.close_pools()
+
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        ssl_mode="require",
+        wait_timeout_ms=1000,
+    )
+
+    with pytest.raises(_native.PostgresOperationalError):
+        await _native.execute(
+            pool=pool,
+            sql="SELECT 1::BIGINT",
+        )
