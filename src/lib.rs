@@ -373,6 +373,7 @@ fn to_python_error(error: NativeError) -> PyErr {
         | NativeError::PostgresCancel(_)
         | NativeError::PostgresTransaction { .. }
         | NativeError::TransactionStartCancelled
+        | NativeError::TlsConfiguration(_)
         | NativeError::QueryCancelled { .. }) => {
             PostgresOperationalError::new_err(error.to_string())
         }
