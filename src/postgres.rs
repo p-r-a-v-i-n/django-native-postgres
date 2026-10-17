@@ -81,6 +81,8 @@ pub(crate) fn create_pool(
     database_url: &str,
     pool_max_size: usize,
     pool_wait_timeout_ms: u64,
+    _ssl_mode: &str,
+    _ssl_root_cert: Option<&str>,
 ) -> Result<Pool, NativeError> {
     let postgres_config = database_url.parse().map_err(NativeError::PostgresConnect)?;
     let manager = Manager::from_config(

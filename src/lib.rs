@@ -33,13 +33,22 @@ async fn runtime_probe(delay_ms: u64) -> PyResult<u64> {
     runtime::probe(delay_ms).await.map_err(to_python_error)
 }
 
-#[pyfunction(signature=(database_url, max_size=16, wait_timeout_ms=30_000))]
+#[pyfunction(signature=(database_url, max_size=16, wait_timeout_ms=30_000, ssl_mode="prefer", ssl_root_cert=None))]
 fn create_pool(
     database_url: String,
     max_size: usize,
     wait_timeout_ms: i64,
+    ssl_mode: &str,
+    ssl_root_cert: Option<String>,
 ) -> PyResult<pool::PoolHandle> {
-    pool::PoolHandle::new(database_url, max_size, wait_timeout_ms).map_err(to_python_error)
+    pool::PoolHandle::new(
+        database_url,
+        max_size,
+        wait_timeout_ms,
+        ssl_mode.to_owned(),
+        ssl_root_cert,
+    )
+    .map_err(to_python_error)
 }
 
 #[pyfunction]

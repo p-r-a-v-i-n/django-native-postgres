@@ -23,7 +23,11 @@ class DatabaseWrapper(PostgreSQLDatabaseWrapper):
 
         if executor is None:
             settings = self.settings_dict
-            pool_options = settings.get("OPTIONS", {}).get("native_pool", {})
+            options = settings.get("OPTIONS", {})
+            pool_options = options.get("native_pool", {})
+
+            ssl_mode = options.get("sslmode", "prefer")
+            ssl_root_cert = options.get("sslrootcert")
             pool_max_size = pool_options.get("max_size", 16)
             pool_wait_timeout_ms = pool_options.get("wait_timeout_ms", 30_000)
             database_url = make_conninfo(
@@ -56,6 +60,8 @@ class DatabaseWrapper(PostgreSQLDatabaseWrapper):
                 database_url=database_url,
                 pool_max_size=pool_max_size,
                 pool_wait_timeout_ms=pool_wait_timeout_ms,
+                ssl_mode=ssl_mode,
+                ssl_root_cert=ssl_root_cert,
             )
             self._native_executor = executor
         return executor
