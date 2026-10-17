@@ -1,5 +1,6 @@
 use crate::error::NativeError;
 use crate::parameter::QueryParameters;
+use crate::tls::SslMode;
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod};
 use futures_util::TryStreamExt;
 use pyo3::prelude::*;
@@ -81,7 +82,7 @@ pub(crate) fn create_pool(
     database_url: &str,
     pool_max_size: usize,
     pool_wait_timeout_ms: u64,
-    _ssl_mode: &str,
+    _ssl_mode: SslMode,
     _ssl_root_cert: Option<&str>,
 ) -> Result<Pool, NativeError> {
     let postgres_config = database_url.parse().map_err(NativeError::PostgresConnect)?;

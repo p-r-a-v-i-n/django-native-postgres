@@ -231,7 +231,7 @@ async fn get_or_create_pool(
         &handle.database_url,
         handle.max_size,
         handle.wait_timeout_ms,
-        &handle.ssl_mode,
+        handle.ssl_mode,
         handle.ssl_root_cert.as_deref(),
     )?;
 

@@ -20,6 +20,7 @@ mod pool;
 mod postgres;
 mod query_stream;
 mod runtime;
+mod tls;
 mod transaction;
 mod transaction_options;
 
@@ -393,7 +394,8 @@ fn to_python_error(error: NativeError) -> PyErr {
             PostgresNotSupportedError::new_err(error.to_string())
         }
         error @ (NativeError::InvalidTransactionIsolationLevel(_)
-        | NativeError::InvalidQueryStreamFetchSize) => PyValueError::new_err(error.to_string()),
+        | NativeError::InvalidQueryStreamFetchSize
+        | NativeError::InvalidSslMode(_)) => PyValueError::new_err(error.to_string()),
         error => PyRuntimeError::new_err(error.to_string()),
     }
 }

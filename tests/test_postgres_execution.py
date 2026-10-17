@@ -2501,3 +2501,25 @@ async def test_transaction_stream_decode_error_keeps_transaction_usable(
     ) == [[101]]
 
     await _native.rollback_transaction(transaction)
+
+
+def test_create_pool_rejects_invalid_ssl_mode(postgres_database_url):
+    with pytest.raises(
+        ValueError,
+        match="unsupported PostgreSQL SSL mode: invalid",
+    ):
+        _native.create_pool(
+            database_url=postgres_database_url,
+            ssl_mode="invalid",
+        )
+
+
+@pytest.mark.parametrize("ssl_mode", ["disable", "prefer", "require"])
+def test_create_pool_accepts_supported_ssl_modes(
+    postgres_database_url,
+    ssl_mode,
+):
+    _native.create_pool(
+        database_url=postgres_database_url,
+        ssl_mode=ssl_mode,
+    )
