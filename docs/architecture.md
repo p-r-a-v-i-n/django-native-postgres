@@ -205,7 +205,7 @@ The main areas still being developed are:
 
 1. support for more PostgreSQL parameter and result types;
 2. broader result-stream memory validation;
-3. TLS and additional PostgreSQL connection options;
+3. client certificates and additional PostgreSQL connection options;
 4. session initialization and reset behavior;
 5. broader Django compatibility testing; and
 6. publishing a prebuilt Django fork artifact for installations without Git.
