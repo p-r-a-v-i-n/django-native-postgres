@@ -103,13 +103,13 @@ pub(crate) fn create_pool(
     pool_max_size: usize,
     pool_wait_timeout_ms: u64,
     ssl_mode: SslMode,
-    _ssl_root_cert: Option<&str>,
+    ssl_root_cert: Option<&str>,
 ) -> Result<PostgresPool, NativeError> {
     let mut postgres_config: tokio_postgres::Config =
         database_url.parse().map_err(NativeError::PostgresConnect)?;
     postgres_config.ssl_mode(ssl_mode.postgres_mode());
 
-    let tls = TlsConnector::new(ssl_mode)?;
+    let tls = TlsConnector::new(ssl_mode, ssl_root_cert)?;
     let manager = match &tls {
         TlsConnector::Disabled => Manager::from_config(
             postgres_config,

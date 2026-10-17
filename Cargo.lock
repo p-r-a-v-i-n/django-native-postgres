@@ -221,6 +221,7 @@ dependencies = [
  "deadpool-postgres",
  "futures-util",
  "pyo3",
+ "rustls",
  "rustls-pemfile",
  "tokio",
  "tokio-postgres",
