@@ -9,15 +9,16 @@ use tokio::sync::{mpsc, oneshot};
 use crate::cancellation::CancellationGuard;
 use crate::error::NativeError;
 use crate::parameter::QueryParameters;
-use crate::postgres::{self, QueryResult};
+use crate::postgres::{self, PostgresPool, QueryResult};
 use crate::query_stream::{
     self, QueryStreamCommand, QueryStreamFetchResult, QueryStreamHandle, QueryStreamOpenResult,
     StartedQueryStream,
 };
+use crate::tls::TlsConnector;
 use crate::transaction_options::TransactionOptions;
-use deadpool_postgres::{Object, Pool};
+use deadpool_postgres::Object;
 use std::process;
-use tokio_postgres::{NoTls, Row, RowStream};
+use tokio_postgres::{Row, RowStream};
 
 enum TransactionStreamExit {
     Finished,
@@ -91,7 +92,7 @@ impl TransactionHandle {
 }
 
 pub(crate) async fn begin(
-    pool: &Pool,
+    pool: &PostgresPool,
     options: TransactionOptions,
     mut cancellation: oneshot::Receiver<()>,
 ) -> Result<TransactionHandle, NativeError> {
@@ -100,7 +101,7 @@ pub(crate) async fn begin(
         _ = &mut cancellation => {
             return Err(NativeError::TransactionStartCancelled);
         }
-        result = pool.get() => {
+        result = pool.pool().get() => {
             result.map_err(|error| NativeError::PostgresPoolAcquire(error.to_string()))?
         }
     };
@@ -110,6 +111,7 @@ pub(crate) async fn begin(
 
     tokio::spawn(run_transaction(
         client,
+        pool.tls().clone(),
         options,
         cancellation,
         receiver,
@@ -207,6 +209,7 @@ pub(crate) async fn rollback(handle: TransactionHandle) -> Result<(), NativeErro
 
 async fn run_transaction(
     mut client: Object,
+    tls: TlsConnector,
     options: TransactionOptions,
     mut cancellation: oneshot::Receiver<()>,
     mut receiver: mpsc::Receiver<TransactionCommand>,
@@ -242,7 +245,7 @@ async fn run_transaction(
             }
         }
         _ = &mut cancellation => {
-            let cancellation_result = cancel_token.cancel_query(NoTls).await;
+            let cancellation_result = tls.cancel_query(&cancel_token).await;
             let start_result = start.as_mut().await;
             drop(start);
 
@@ -288,6 +291,7 @@ async fn run_transaction(
                 let result = postgres::execute_on_client(
                     &*transaction,
                     cancel_token,
+                    &tls,
                     &sql,
                     params,
                     &mut cancellation,
@@ -317,6 +321,7 @@ async fn run_transaction(
                 let started = query_stream::start_on_client(
                     &*transaction,
                     cancel_token,
+                    &tls,
                     &sql,
                     params,
                     &mut cancellation,
@@ -337,9 +342,13 @@ async fn run_transaction(
                 };
 
                 if columns.is_empty() {
-                    let result =
-                        finish_transaction_non_row_query(&transaction, rows, &mut cancellation)
-                            .await;
+                    let result = finish_transaction_non_row_query(
+                        &transaction,
+                        rows,
+                        &tls,
+                        &mut cancellation,
+                    )
+                    .await;
                     let connection_can_be_reused = result
                         .as_ref()
                         .map_or_else(transaction_error_allows_reuse, |_| true)
@@ -367,6 +376,7 @@ async fn run_transaction(
                 match run_transaction_query_stream(
                     &transaction,
                     rows,
+                    &tls,
                     stream_receiver,
                     &mut receiver,
                 )
@@ -408,6 +418,7 @@ async fn run_transaction(
 async fn finish_transaction_non_row_query(
     transaction: &deadpool_postgres::Transaction<'_>,
     rows: RowStream,
+    tls: &TlsConnector,
     cancellation: &mut oneshot::Receiver<()>,
 ) -> Result<QueryStreamOpenResult, NativeError> {
     let mut rows = Box::pin(rows);
@@ -444,7 +455,7 @@ async fn finish_transaction_non_row_query(
                 return Err(NativeError::PostgresQuery(error));
             }
             StreamNextRow::Cancelled => {
-                return Err(cancel_transaction_rows(transaction, rows.as_mut()).await);
+                return Err(cancel_transaction_rows(transaction, tls, rows.as_mut()).await);
             }
         }
     }
@@ -453,6 +464,7 @@ async fn finish_transaction_non_row_query(
 async fn run_transaction_query_stream(
     transaction: &deadpool_postgres::Transaction<'_>,
     rows: RowStream,
+    tls: &TlsConnector,
     mut stream_receiver: mpsc::Receiver<QueryStreamCommand>,
     transaction_receiver: &mut mpsc::Receiver<TransactionCommand>,
 ) -> TransactionStreamExit {
@@ -546,7 +558,8 @@ async fn run_transaction_query_stream(
                             };
                         }
                         StreamNextRow::Cancelled => {
-                            let error = cancel_transaction_rows(transaction, rows.as_mut()).await;
+                            let error =
+                                cancel_transaction_rows(transaction, tls, rows.as_mut()).await;
                             let connection_can_be_reused = transaction_error_allows_reuse(&error)
                                 && !transaction.client().is_closed();
                             let _ = response.send(Err(error));
@@ -629,9 +642,11 @@ async fn drain_rows(mut rows: Pin<&mut RowStream>) -> Result<u64, NativeError> {
 
 async fn cancel_transaction_rows(
     transaction: &deadpool_postgres::Transaction<'_>,
+    tls: &TlsConnector,
     mut rows: Pin<&mut RowStream>,
 ) -> NativeError {
-    let cancellation = transaction.cancel_token().cancel_query(NoTls).await;
+    let cancel_token = transaction.cancel_token();
+    let cancellation = tls.cancel_query(&cancel_token).await;
     let operation_allows_reuse = loop {
         match rows.as_mut().try_next().await {
             Ok(Some(_)) => {}

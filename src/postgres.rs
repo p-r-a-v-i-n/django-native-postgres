@@ -1,5 +1,6 @@
 use crate::error::NativeError;
 use crate::parameter::QueryParameters;
+use crate::tls::{SslMode, TlsConnector};
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod};
 use futures_util::TryStreamExt;
 use pyo3::prelude::*;
@@ -8,6 +9,26 @@ use tokio::sync::oneshot;
 use tokio_postgres::error::{Severity, SqlState};
 use tokio_postgres::types::{ToSql, Type};
 use tokio_postgres::{CancelToken, GenericClient, NoTls};
+
+#[derive(Clone)]
+pub(crate) struct PostgresPool {
+    pool: Pool,
+    tls: TlsConnector,
+}
+
+impl PostgresPool {
+    pub(crate) fn pool(&self) -> &Pool {
+        &self.pool
+    }
+
+    pub(crate) fn tls(&self) -> &TlsConnector {
+        &self.tls
+    }
+
+    pub(crate) fn close(&self) {
+        self.pool.close();
+    }
+}
 
 #[derive(Debug, IntoPyObject)]
 pub(crate) enum QueryValue {
@@ -81,27 +102,45 @@ pub(crate) fn create_pool(
     database_url: &str,
     pool_max_size: usize,
     pool_wait_timeout_ms: u64,
-) -> Result<Pool, NativeError> {
-    let postgres_config = database_url.parse().map_err(NativeError::PostgresConnect)?;
-    let manager = Manager::from_config(
-        postgres_config,
-        NoTls,
-        ManagerConfig {
-            recycling_method: RecyclingMethod::Fast,
-        },
-    );
+    ssl_mode: SslMode,
+    ssl_root_cert: Option<&str>,
+) -> Result<PostgresPool, NativeError> {
+    let mut postgres_config: tokio_postgres::Config =
+        database_url.parse().map_err(NativeError::PostgresConnect)?;
+    postgres_config.ssl_mode(ssl_mode.postgres_mode());
 
-    Pool::builder(manager)
+    let tls = TlsConnector::new(ssl_mode, ssl_root_cert)?;
+    let manager = match &tls {
+        TlsConnector::Disabled => Manager::from_config(
+            postgres_config,
+            NoTls,
+            ManagerConfig {
+                recycling_method: RecyclingMethod::Fast,
+            },
+        ),
+        TlsConnector::Rustls(connector) => Manager::from_config(
+            postgres_config,
+            connector.clone(),
+            ManagerConfig {
+                recycling_method: RecyclingMethod::Fast,
+            },
+        ),
+    };
+
+    let pool = Pool::builder(manager)
         .max_size(pool_max_size)
         .wait_timeout(Some(Duration::from_millis(pool_wait_timeout_ms)))
         .runtime(deadpool_postgres::Runtime::Tokio1)
         .build()
-        .map_err(|error| NativeError::PostgresPoolBuild(error.to_string()))
+        .map_err(|error| NativeError::PostgresPoolBuild(error.to_string()))?;
+
+    Ok(PostgresPool { pool, tls })
 }
 
 pub(crate) async fn execute_on_client<C>(
     client: &C,
     cancel_token: CancelToken,
+    tls: &TlsConnector,
     sql: &str,
     params: QueryParameters,
     cancellation: &mut oneshot::Receiver<()>,
@@ -129,8 +168,8 @@ where
             result.map_err(NativeError::PostgresQuery)?
         }
         _ = &mut *cancellation => {
-            cancel_token
-                .cancel_query(NoTls)
+            tls
+                .cancel_query(&cancel_token)
                 .await
                 .map_err(NativeError::PostgresCancel)?;
 
@@ -168,8 +207,8 @@ where
                 result.map_err(NativeError::PostgresQuery)?
             }
             _ = &mut *cancellation => {
-                cancel_token
-                    .cancel_query(NoTls)
+                tls
+                    .cancel_query(&cancel_token)
                     .await
                     .map_err(NativeError::PostgresCancel)?;
 
@@ -224,13 +263,13 @@ where
 }
 
 pub(crate) async fn execute(
-    pool: &Pool,
+    pool: &PostgresPool,
     sql: &str,
     params: QueryParameters,
     cancellation: &mut oneshot::Receiver<()>,
 ) -> Result<QueryResult, NativeError> {
     let client = tokio::select! {
-        result = pool.get() => {
+        result = pool.pool().get() => {
             result.map_err(|error| NativeError::PostgresPoolAcquire(error.to_string()))?
         }
         _ = &mut *cancellation => {
@@ -241,7 +280,15 @@ pub(crate) async fn execute(
     };
 
     let cancel_token = client.cancel_token();
-    let result = execute_on_client(&**client, cancel_token, sql, params, cancellation).await;
+    let result = execute_on_client(
+        &**client,
+        cancel_token,
+        pool.tls(),
+        sql,
+        params,
+        cancellation,
+    )
+    .await;
 
     let connection_can_be_reused = !client.is_closed()
         && match &result {

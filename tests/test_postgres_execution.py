@@ -1,6 +1,7 @@
 import asyncio
 import multiprocessing
 import os
+import ssl
 from types import SimpleNamespace
 
 import pytest
@@ -2501,3 +2502,141 @@ async def test_transaction_stream_decode_error_keeps_transaction_usable(
     ) == [[101]]
 
     await _native.rollback_transaction(transaction)
+
+
+def test_create_pool_rejects_invalid_ssl_mode(postgres_database_url):
+    with pytest.raises(
+        ValueError,
+        match="unsupported PostgreSQL SSL mode: invalid",
+    ):
+        _native.create_pool(
+            database_url=postgres_database_url,
+            ssl_mode="invalid",
+        )
+
+
+@pytest.mark.parametrize("ssl_mode", ["disable", "prefer", "require"])
+def test_create_pool_accepts_supported_ssl_modes(
+    postgres_database_url,
+    ssl_mode,
+):
+    _native.create_pool(
+        database_url=postgres_database_url,
+        ssl_mode=ssl_mode,
+    )
+
+
+@pytest.mark.asyncio
+async def test_ssl_mode_require_rejects_plaintext_server(
+    postgres_database_url,
+):
+    await _native.close_pools()
+
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        ssl_mode="require",
+        wait_timeout_ms=1000,
+    )
+
+    with pytest.raises(_native.PostgresOperationalError):
+        await _native.execute(
+            pool=pool,
+            sql="SELECT 1::BIGINT",
+        )
+
+
+@pytest.mark.asyncio
+async def test_ssl_mode_disable_does_not_read_root_certificate(
+    postgres_database_url,
+    tmp_path,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        ssl_mode="disable",
+        ssl_root_cert=str(tmp_path / "missing.pem"),
+    )
+
+    assert await _native.execute(pool=pool, sql="SELECT 1::BIGINT") == [[1]]
+
+
+@pytest.mark.asyncio
+async def test_ssl_root_certificate_rejects_missing_file(
+    postgres_database_url,
+    tmp_path,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        ssl_root_cert=str(tmp_path / "missing.pem"),
+    )
+
+    with pytest.raises(
+        _native.PostgresOperationalError,
+        match="could not open root certificate file",
+    ):
+        await _native.execute(pool=pool, sql="SELECT 1::BIGINT")
+
+
+@pytest.mark.asyncio
+async def test_ssl_root_certificate_rejects_empty_file(
+    postgres_database_url,
+    tmp_path,
+):
+    root_certificate = tmp_path / "empty.pem"
+    root_certificate.write_text("")
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        ssl_root_cert=str(root_certificate),
+    )
+
+    with pytest.raises(
+        _native.PostgresOperationalError,
+        match="contains no certificates",
+    ):
+        await _native.execute(pool=pool, sql="SELECT 1::BIGINT")
+
+
+@pytest.mark.asyncio
+async def test_ssl_root_certificate_rejects_malformed_pem(
+    postgres_database_url,
+    tmp_path,
+):
+    root_certificate = tmp_path / "malformed.pem"
+    root_certificate.write_text(
+        "-----BEGIN CERTIFICATE-----\ninvalid\n-----END CERTIFICATE-----\n"
+    )
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        ssl_root_cert=str(root_certificate),
+    )
+
+    with pytest.raises(
+        _native.PostgresOperationalError,
+        match="contains no valid certificates",
+    ):
+        await _native.execute(pool=pool, sql="SELECT 1::BIGINT")
+
+
+@pytest.mark.asyncio
+async def test_ssl_root_certificate_accepts_certificate_bundle(
+    postgres_database_url,
+):
+    verify_paths = ssl.get_default_verify_paths()
+    root_certificate = verify_paths.cafile
+    if root_certificate is None and verify_paths.capath is not None:
+        root_certificate = next(
+            (
+                os.path.join(verify_paths.capath, name)
+                for name in sorted(os.listdir(verify_paths.capath))
+                if os.path.isfile(os.path.join(verify_paths.capath, name))
+            ),
+            None,
+        )
+    if root_certificate is None:
+        pytest.skip("no system CA certificate file is available")
+
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        ssl_root_cert=root_certificate,
+    )
+
+    assert await _native.execute(pool=pool, sql="SELECT 1::BIGINT") == [[1]]

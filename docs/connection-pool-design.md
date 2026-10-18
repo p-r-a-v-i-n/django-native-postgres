@@ -226,7 +226,7 @@ The integration suite verifies:
 
 Work still in progress includes:
 
-- TLS;
+- client certificates and additional TLS options;
 - complete PostgreSQL connection options;
 - session initialization and reset rules;
 - idle connection and maximum-lifetime policies;

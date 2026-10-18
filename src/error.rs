@@ -34,6 +34,8 @@ pub(crate) enum NativeError {
     QueryCancelled {
         connection_can_be_reused: bool,
     },
+    InvalidSslMode(String),
+    TlsConfiguration(String),
 }
 
 impl std::fmt::Display for NativeError {
@@ -141,6 +143,12 @@ impl std::fmt::Display for NativeError {
             }
             Self::QueryCancelled { .. } => {
                 write!(formatter, "PostgreSQL query was cancelled")
+            }
+            Self::InvalidSslMode(error) => {
+                write!(formatter, "unsupported PostgreSQL SSL mode: {error}")
+            }
+            Self::TlsConfiguration(error) => {
+                write!(formatter, "failed to configure PostgreSQL TLS: {error}")
             }
         }
     }

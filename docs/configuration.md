@@ -15,6 +15,8 @@ DATABASES = {
         "HOST": "127.0.0.1",
         "PORT": "5432",
         "OPTIONS": {
+            "sslmode": "require",
+            "sslrootcert": "/etc/ssl/postgres-ca.pem",
             "native_pool": {
                 "max_size": 16,
                 "wait_timeout_ms": 30_000,
@@ -53,6 +55,34 @@ native pool.
 
 This is not a PostgreSQL statement timeout. It limits only pool acquisition.
 
+## TLS options
+
+### `sslmode`
+
+Controls whether the native PostgreSQL connection uses TLS.
+
+- `disable` uses a plaintext connection.
+- `prefer` requests TLS and permits a plaintext server. This is the default.
+- `require` requires TLS and rejects a plaintext server.
+
+TLS connections verify the server certificate and hostname. This makes the
+current `require` behavior stricter than libpq's encryption-only `require`
+mode. Other libpq modes, including `allow`, `verify-ca`, and `verify-full`, are
+rejected until their behavior is implemented explicitly.
+
+### `sslrootcert`
+
+Path to a PEM certificate or certificate bundle used to verify the PostgreSQL
+server. When omitted, the native connection uses the operating system's root
+certificates. A configured file replaces, rather than extends, that native
+root store.
+
+`sslrootcert` is ignored when `sslmode` is `disable`. Missing, empty,
+malformed, and unusable certificate files fail explicitly when the native
+pool first connects.
+
+Client certificates through `sslcert` and `sslkey` are not yet supported.
+
 ## Connection settings currently forwarded
 
 The native executor currently builds its connection configuration from:
@@ -61,15 +91,17 @@ The native executor currently builds its connection configuration from:
 - `USER`;
 - `PASSWORD`;
 - `HOST`; and
-- `PORT`.
+- `PORT`;
+- `OPTIONS["sslmode"]`; and
+- `OPTIONS["sslrootcert"]`.
 
 If `NAME` is empty, it defaults to `postgres`.
 
 The synchronous Django PostgreSQL backend may understand additional Psycopg
 and `OPTIONS` settings, but they are not automatically applied to the native
-Tokio connections. TLS, roles, service files, search paths, application names,
-and arbitrary PostgreSQL connection options need explicit native support
-before they can be documented as compatible.
+Tokio connections. Client certificates, roles, service files, search paths,
+application names, and arbitrary PostgreSQL connection options need explicit
+native support before they can be documented as compatible.
 
 ## Standard Django settings not yet applied to native connections
 

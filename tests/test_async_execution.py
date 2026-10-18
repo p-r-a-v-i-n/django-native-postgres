@@ -427,6 +427,8 @@ async def test_native_executor_forwards_query_to_native_extension():
             database_url="postgresql://example",
             pool_max_size=4,
             pool_wait_timeout_ms=250,
+            ssl_mode="prefer",
+            ssl_root_cert=None,
         )
         result = await executor.execute(
             sql="SELECT %s::BIGINT",
@@ -438,6 +440,8 @@ async def test_native_executor_forwards_query_to_native_extension():
         database_url="postgresql://example",
         max_size=4,
         wait_timeout_ms=250,
+        ssl_mode="prefer",
+        ssl_root_cert=None,
     )
     execute.assert_awaited_once_with(
         pool=pool,
@@ -1472,3 +1476,30 @@ async def test_executor_restores_context_after_commit_error():
         sql="SELECT 'pool'",
         params=None,
     )
+
+
+def test_database_wrapper_forwards_tls_options():
+    settings_dict = {
+        "ENGINE": "django_native_postgres",
+        "NAME": "example_database",
+        "USER": "example_user",
+        "PASSWORD": "example_password",
+        "HOST": "database.example.com",
+        "PORT": "5432",
+        "TIME_ZONE": None,
+        "OPTIONS": {
+            "sslmode": "require",
+            "sslrootcert": "/certs/postgres-ca.pem",
+        },
+    }
+    connection = DatabaseWrapper(settings_dict, alias="default")
+    pool = object()
+
+    with mock.patch(
+        "django_native_postgres.executor._native.create_pool",
+        return_value=pool,
+    ) as create_pool:
+        connection.get_async_executor()
+
+    assert create_pool.call_args.kwargs["ssl_mode"] == "require"
+    assert create_pool.call_args.kwargs["ssl_root_cert"] == "/certs/postgres-ca.pem"

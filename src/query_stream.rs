@@ -4,15 +4,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::cancellation::CancellationGuard;
 use crate::error::NativeError;
 use crate::parameter::QueryParameters;
-use crate::postgres::{self, QueryColumns, QueryRows};
-use deadpool_postgres::{Object, Pool};
+use crate::postgres::{self, PostgresPool, QueryColumns, QueryRows};
+use crate::tls::TlsConnector;
+use deadpool_postgres::Object;
 use futures_util::{FutureExt, TryStreamExt};
 use pyo3::prelude::*;
 use std::pin::Pin;
 use std::process;
 use tokio::sync::{mpsc, oneshot};
 use tokio_postgres::types::{ToSql, Type};
-use tokio_postgres::{CancelToken, GenericClient, NoTls, Row, RowStream};
+use tokio_postgres::{CancelToken, GenericClient, Row, RowStream};
 
 enum OperationOutcome<T> {
     Completed(Result<T, tokio_postgres::Error>),
@@ -106,6 +107,7 @@ pub(crate) struct StartedQueryStream {
 pub(crate) async fn start_on_client<C>(
     client: &C,
     cancel_token: CancelToken,
+    tls: &TlsConnector,
     sql: &str,
     params: QueryParameters,
     cancellation: &mut oneshot::Receiver<()>,
@@ -126,7 +128,7 @@ where
         tokio::select! {
             biased;
             _ = &mut *cancellation => {
-                let cancellation = cancel_token.cancel_query(NoTls).await;
+                let cancellation = tls.cancel_query(&cancel_token).await;
                 let operation = prepare.as_mut().await;
                 OperationOutcome::Cancelled {
                     cancellation,
@@ -177,7 +179,7 @@ where
         tokio::select! {
             biased;
             _ = &mut *cancellation => {
-                let cancellation = cancel_token.cancel_query(NoTls).await;
+                let cancellation = tls.cancel_query(&cancel_token).await;
                 let operation = query.as_mut().await;
                 OperationOutcome::Cancelled {
                     cancellation,
@@ -219,7 +221,7 @@ where
 }
 
 pub(crate) async fn open(
-    pool: &Pool,
+    pool: &PostgresPool,
     sql: String,
     params: QueryParameters,
     mut cancellation: oneshot::Receiver<()>,
@@ -231,38 +233,46 @@ pub(crate) async fn open(
                 connection_can_be_reused: true,
             });
         }
-        result = pool.get() => {
+        result = pool.pool().get() => {
             result.map_err(|error| NativeError::PostgresPoolAcquire(error.to_string()))?
         }
     };
 
     let cancel_token = client.cancel_token();
-    let StartedQueryStream { rows, columns } =
-        match start_on_client(&**client, cancel_token, &sql, params, &mut cancellation).await {
-            Ok(started) => started,
-            Err(error) => {
-                let connection_can_be_reused = !client.is_closed()
-                    && match &error {
-                        NativeError::PostgresQuery(error) => {
-                            postgres::query_error_allows_connection_reuse(error)
-                        }
-                        NativeError::PostgresCancel(_) => false,
-                        NativeError::QueryCancelled {
-                            connection_can_be_reused,
-                        } => *connection_can_be_reused,
-                        _ => true,
-                    };
-                discard_if_needed(client, connection_can_be_reused);
-                return Err(error);
-            }
-        };
+    let StartedQueryStream { rows, columns } = match start_on_client(
+        &**client,
+        cancel_token,
+        pool.tls(),
+        &sql,
+        params,
+        &mut cancellation,
+    )
+    .await
+    {
+        Ok(started) => started,
+        Err(error) => {
+            let connection_can_be_reused = !client.is_closed()
+                && match &error {
+                    NativeError::PostgresQuery(error) => {
+                        postgres::query_error_allows_connection_reuse(error)
+                    }
+                    NativeError::PostgresCancel(_) => false,
+                    NativeError::QueryCancelled {
+                        connection_can_be_reused,
+                    } => *connection_can_be_reused,
+                    _ => true,
+                };
+            discard_if_needed(client, connection_can_be_reused);
+            return Err(error);
+        }
+    };
 
     if columns.is_empty() {
-        return finish_non_row_query(client, rows, cancellation).await;
+        return finish_non_row_query(client, rows, pool.tls(), cancellation).await;
     }
 
     let (sender, receiver) = mpsc::channel(1);
-    tokio::spawn(run_query_stream(client, rows, receiver));
+    tokio::spawn(run_query_stream(client, rows, pool.tls().clone(), receiver));
 
     Ok(QueryStreamOpenResult {
         handle: QueryStreamHandle::new(sender),
@@ -274,6 +284,7 @@ pub(crate) async fn open(
 async fn finish_non_row_query(
     client: Object,
     rows: RowStream,
+    tls: &TlsConnector,
     mut cancellation: oneshot::Receiver<()>,
 ) -> Result<QueryStreamOpenResult, NativeError> {
     let mut rows = Box::pin(rows);
@@ -313,7 +324,7 @@ async fn finish_non_row_query(
                 return Err(NativeError::PostgresQuery(error));
             }
             NextRowOutcome::Cancelled => {
-                let cleanup = cancel_and_drain(&client, rows.as_mut()).await;
+                let cleanup = cancel_and_drain(&client, tls, rows.as_mut()).await;
                 let connection_can_be_reused = cleanup.as_ref().is_ok_and(|reusable| *reusable);
                 let error = match cleanup {
                     Ok(_) => NativeError::QueryCancelled {
@@ -407,13 +418,14 @@ pub(crate) async fn close(handle: QueryStreamHandle) -> Result<(), NativeError> 
 async fn run_query_stream(
     client: Object,
     rows: RowStream,
+    tls: TlsConnector,
     mut receiver: mpsc::Receiver<QueryStreamCommand>,
 ) {
     let mut rows = Box::pin(rows);
     let mut pending_row = None;
     let connection_can_be_reused = loop {
         let Some(command) = receiver.recv().await else {
-            break cancel_and_drain(&client, rows.as_mut())
+            break cancel_and_drain(&client, &tls, rows.as_mut())
                 .await
                 .is_ok_and(|reusable| reusable);
         };
@@ -446,7 +458,7 @@ async fn run_query_stream(
                     let row = match next_row {
                         NextRowOutcome::Row(row) => row,
                         NextRowOutcome::Cancelled => {
-                            let cleanup = cancel_and_drain(&client, rows.as_mut()).await;
+                            let cleanup = cancel_and_drain(&client, &tls, rows.as_mut()).await;
                             let connection_can_be_reused =
                                 cleanup.as_ref().is_ok_and(|reusable| *reusable);
                             let error = match cleanup {
@@ -482,7 +494,7 @@ async fn run_query_stream(
                 }
 
                 if let Some(error) = fetch_error {
-                    let connection_can_be_reused = cancel_and_drain(&client, rows.as_mut())
+                    let connection_can_be_reused = cancel_and_drain(&client, &tls, rows.as_mut())
                         .await
                         .is_ok_and(|reusable| reusable);
                     let _ = response.send(Err(error));
@@ -515,7 +527,7 @@ async fn run_query_stream(
                     }))
                     .is_err()
                 {
-                    break cancel_and_drain(&client, rows.as_mut())
+                    break cancel_and_drain(&client, &tls, rows.as_mut())
                         .await
                         .is_ok_and(|reusable| reusable);
                 }
@@ -525,7 +537,7 @@ async fn run_query_stream(
                 }
             }
             QueryStreamCommand::Close { response } => {
-                let cleanup = cancel_and_drain(&client, rows.as_mut()).await;
+                let cleanup = cancel_and_drain(&client, &tls, rows.as_mut()).await;
                 let connection_can_be_reused = cleanup.as_ref().is_ok_and(|reusable| *reusable);
                 let result = cleanup.map(|_| ());
                 let _ = response.send(result);
@@ -539,11 +551,11 @@ async fn run_query_stream(
 
 async fn cancel_and_drain(
     client: &Object,
+    tls: &TlsConnector,
     mut rows: Pin<&mut RowStream>,
 ) -> Result<bool, NativeError> {
-    client
-        .cancel_token()
-        .cancel_query(NoTls)
+    let cancel_token = client.cancel_token();
+    tls.cancel_query(&cancel_token)
         .await
         .map_err(NativeError::PostgresCancel)?;
 

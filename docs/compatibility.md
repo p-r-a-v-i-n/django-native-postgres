@@ -78,9 +78,12 @@ results. The batch boundary is not an exact memory bound for PostgreSQL or
 
 ### TLS
 
-Native connections currently use `tokio_postgres::NoTls`. Do not use the
-native connection path where encrypted or certificate-verified PostgreSQL
-connections are required.
+Native connections support `sslmode` values `disable`, `prefer`, and `require`.
+TLS server certificates and hostnames are verified using the operating-system
+root store or a PEM file configured through `sslrootcert`.
+
+The current `require` behavior is stricter than libpq's encryption-only mode.
+The remaining libpq SSL modes and client certificates are not yet supported.
 
 ### Session configuration
 

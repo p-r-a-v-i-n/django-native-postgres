@@ -8,14 +8,13 @@ use crate::cancellation::CancellationGuard;
 use crate::error::NativeError;
 use crate::parameter::QueryParameters;
 use crate::pool::PoolHandle;
-use crate::postgres::{self, QueryResult};
+use crate::postgres::{self, PostgresPool, QueryResult};
 use crate::query_stream::{self, QueryStreamOpenResult};
 use crate::transaction::{self, TransactionHandle};
 use crate::transaction_options::TransactionOptions;
-use deadpool_postgres::Pool;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
-type PoolRegistry = Arc<Mutex<HashMap<u64, Pool>>>;
+type PoolRegistry = Arc<Mutex<HashMap<u64, PostgresPool>>>;
 
 enum Command {
     Probe {
@@ -216,7 +215,7 @@ impl RuntimeService {
 async fn get_or_create_pool(
     pools: &PoolRegistry,
     handle: &PoolHandle,
-) -> Result<Pool, NativeError> {
+) -> Result<PostgresPool, NativeError> {
     let mut pools = pools.lock().await;
 
     if handle.is_closed() {
@@ -231,6 +230,8 @@ async fn get_or_create_pool(
         &handle.database_url,
         handle.max_size,
         handle.wait_timeout_ms,
+        handle.ssl_mode,
+        handle.ssl_root_cert.as_deref(),
     )?;
 
     // Closing can race with the first pool creation.
