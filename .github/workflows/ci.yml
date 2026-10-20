@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  UV_VERSION: "0.13.0"
+  UV_VERSION: "0.13.3"
 
 jobs:
   quality:
@@ -29,9 +29,9 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
           components: clippy, rustfmt
 
       - name: Install uv and Python
@@ -100,9 +100,9 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
 
       - name: Install uv and Python
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
@@ -133,9 +133,9 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
 
       - name: Install uv and Python
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
