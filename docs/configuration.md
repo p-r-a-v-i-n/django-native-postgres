@@ -90,10 +90,11 @@ The native executor currently builds its connection configuration from:
 - `NAME`;
 - `USER`;
 - `PASSWORD`;
-- `HOST`; and
+- `HOST`;
 - `PORT`;
-- `OPTIONS["sslmode"]`; and
-- `OPTIONS["sslrootcert"]`.
+- `OPTIONS["sslmode"]`;
+- `OPTIONS["sslrootcert"]`; and
+- Django's resolved database time zone.
 
 If `NAME` is empty, it defaults to `postgres`.
 
@@ -102,6 +103,27 @@ and `OPTIONS` settings, but they are not automatically applied to the native
 Tokio connections. Client certificates, roles, service files, search paths,
 application names, and arbitrary PostgreSQL connection options need explicit
 native support before they can be documented as compatible.
+
+## Session initialization
+
+Every newly created physical connection is initialized with
+`DatabaseWrapper.timezone_name`. Django resolves this from `USE_TZ`, the
+project `TIME_ZONE`, and the database `TIME_ZONE` setting.
+
+Initialization runs once when PostgreSQL opens the connection, not every time
+the pool lends that connection to a query. Reusing an initialized connection
+therefore adds no initialization query.
+
+The native executor captures the resolved time zone when it first creates its
+pool. Changing Django time-zone settings at runtime does not reconfigure an
+existing native pool.
+
+The pool does not currently reset arbitrary session changes before reuse.
+Applications must not rely on standalone queries preserving `SET ROLE`,
+`search_path`, temporary tables, listeners, session advisory locks, or other
+session-local state. Transaction-specific settings should use `SET LOCAL`
+inside `transaction.atomic()` so PostgreSQL removes them when the transaction
+ends.
 
 ## Standard Django settings not yet applied to native connections
 
@@ -113,7 +135,7 @@ settings:
 - `AUTOCOMMIT=False`;
 - `ATOMIC_REQUESTS`;
 - most PostgreSQL `OPTIONS`; or
-- Django's time-zone and other session initialization.
+- session initialization other than the database time zone.
 
 These settings may still affect the inherited synchronous Psycopg path. They
 do not configure the Tokio and `deadpool-postgres` connections. In particular,

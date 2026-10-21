@@ -1,7 +1,7 @@
 use crate::error::NativeError;
 use crate::parameter::QueryParameters;
 use crate::tls::{SslMode, TlsConnector};
-use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod};
+use deadpool_postgres::{Hook, HookError, Manager, ManagerConfig, Object, Pool, RecyclingMethod};
 use futures_util::TryStreamExt;
 use pyo3::prelude::*;
 use std::time::Duration;
@@ -104,6 +104,7 @@ pub(crate) fn create_pool(
     pool_wait_timeout_ms: u64,
     ssl_mode: SslMode,
     ssl_root_cert: Option<&str>,
+    time_zone: Option<&str>,
 ) -> Result<PostgresPool, NativeError> {
     let mut postgres_config: tokio_postgres::Config =
         database_url.parse().map_err(NativeError::PostgresConnect)?;
@@ -127,10 +128,34 @@ pub(crate) fn create_pool(
         ),
     };
 
-    let pool = Pool::builder(manager)
+    let mut pool_builder = Pool::builder(manager)
         .max_size(pool_max_size)
         .wait_timeout(Some(Duration::from_millis(pool_wait_timeout_ms)))
-        .runtime(deadpool_postgres::Runtime::Tokio1)
+        .runtime(deadpool_postgres::Runtime::Tokio1);
+
+    if let Some(time_zone) = time_zone {
+        let time_zone = time_zone.to_owned();
+        pool_builder = pool_builder.post_create(Hook::async_fn(move |client, _metrics| {
+            let time_zone = time_zone.clone();
+            Box::pin(async move {
+                let result = client
+                    .query_one("SELECT set_config('TimeZone', $1, false)", &[&time_zone])
+                    .await;
+
+                result.map(|_row| ()).map_err(|error| {
+                    let message = error
+                        .as_db_error()
+                        .map(|database_error| database_error.message())
+                        .unwrap_or("PostgreSQL connection error");
+                    HookError::message(format!(
+                        "failed to initialize PostgreSQL time zone {time_zone:?}: {message}"
+                    ))
+                })
+            })
+        }));
+    }
+
+    let pool = pool_builder
         .build()
         .map_err(|error| NativeError::PostgresPoolBuild(error.to_string()))?;
 

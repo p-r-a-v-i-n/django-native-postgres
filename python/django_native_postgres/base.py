@@ -62,6 +62,7 @@ class DatabaseWrapper(PostgreSQLDatabaseWrapper):
                 pool_wait_timeout_ms=pool_wait_timeout_ms,
                 ssl_mode=ssl_mode,
                 ssl_root_cert=ssl_root_cert,
+                time_zone=self.timezone_name,
             )
             self._native_executor = executor
         return executor

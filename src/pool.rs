@@ -15,6 +15,7 @@ pub(crate) struct PoolHandle {
     pub(crate) wait_timeout_ms: u64,
     pub(crate) ssl_mode: SslMode,
     pub(crate) ssl_root_cert: Option<String>,
+    pub(crate) time_zone: Option<String>,
     closed: Arc<AtomicBool>,
 }
 
@@ -25,6 +26,7 @@ impl PoolHandle {
         wait_timeout_ms: i64,
         ssl_mode: String,
         ssl_root_cert: Option<String>,
+        time_zone: Option<String>,
     ) -> Result<Self, NativeError> {
         if max_size == 0 {
             return Err(NativeError::InvalidPoolMaxSize);
@@ -43,6 +45,7 @@ impl PoolHandle {
             wait_timeout_ms,
             ssl_mode,
             ssl_root_cert,
+            time_zone,
             closed: Arc::new(AtomicBool::new(false)),
         })
     }

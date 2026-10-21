@@ -70,6 +70,8 @@ The project integration suite currently covers:
   and inside transactions;
 - cancellation of active and pool-waiting queries;
 - TLS connections with system or custom root certificates;
+- physical PostgreSQL connections initialized with Django's database time
+  zone;
 - runtime and pool recreation after POSIX `fork()`, with inherited transaction
   handles rejected.
 

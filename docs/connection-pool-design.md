@@ -228,7 +228,7 @@ Work still in progress includes:
 
 - client certificates and additional TLS options;
 - complete PostgreSQL connection options;
-- session initialization and reset rules;
+- broader session initialization and reset rules;
 - idle connection and maximum-lifetime policies;
 - integration with Django wrapper and process shutdown;
 - metrics and tracing hooks; and
