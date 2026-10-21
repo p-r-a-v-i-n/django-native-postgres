@@ -87,9 +87,14 @@ The remaining libpq SSL modes and client certificates are not yet supported.
 
 ### Session configuration
 
-The native pool does not yet reproduce every PostgreSQL session setting that
-Django and Psycopg may configure, including a complete policy for time zones,
-roles, search paths, and custom connection options.
+Every physical native connection is initialized with Django's resolved
+database time zone. The pool does not yet reproduce other PostgreSQL session
+settings that Django and Psycopg may configure, including roles, search paths,
+and custom connection options.
+
+Arbitrary session changes are not reset before a connection is reused. Session
+state that belongs to one operation should use `SET LOCAL` inside a transaction
+instead of a persistent `SET` command.
 
 ### Test breadth
 
