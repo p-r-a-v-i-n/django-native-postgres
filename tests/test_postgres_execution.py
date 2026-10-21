@@ -2776,6 +2776,48 @@ async def test_clean_session_reset_removes_session_changes(
 
 
 @pytest.mark.asyncio
+async def test_clean_session_reset_releases_session_resources(
+    postgres_database_url,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        session_reset="clean",
+    )
+
+    try:
+        await _native.execute(
+            pool=pool,
+            sql="CREATE TEMP TABLE native_session_reset (value BIGINT)",
+        )
+        assert await _native.execute(
+            pool=pool,
+            sql="SELECT to_regclass('pg_temp.native_session_reset')::TEXT",
+        ) == [[None]]
+
+        await _native.execute(pool=pool, sql="LISTEN native_session_reset")
+        assert await _native.execute(
+            pool=pool,
+            sql="SELECT count(*)::BIGINT FROM pg_listening_channels()",
+        ) == [[0]]
+
+        await _native.execute(
+            pool=pool,
+            sql="SELECT 1::BIGINT FROM pg_advisory_lock(724019)",
+        )
+        assert await _native.execute(
+            pool=pool,
+            sql="""
+                SELECT count(*)::BIGINT
+                FROM pg_locks
+                WHERE pid = pg_backend_pid() AND locktype = 'advisory'
+            """,
+        ) == [[0]]
+    finally:
+        await _native.close_pool(pool)
+
+
+@pytest.mark.asyncio
 async def test_clean_session_reset_restores_connection_time_zone(
     postgres_database_url,
 ):
