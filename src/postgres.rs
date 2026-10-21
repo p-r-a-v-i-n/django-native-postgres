@@ -138,11 +138,19 @@ pub(crate) fn create_pool(
         pool_builder = pool_builder.post_create(Hook::async_fn(move |client, _metrics| {
             let time_zone = time_zone.clone();
             Box::pin(async move {
-                client
+                let result = client
                     .query_one("SELECT set_config('TimeZone', $1, false)", &[&time_zone])
-                    .await
-                    .map(|_row| ())
-                    .map_err(HookError::Backend)
+                    .await;
+
+                result.map(|_row| ()).map_err(|error| {
+                    let message = error
+                        .as_db_error()
+                        .map(|database_error| database_error.message())
+                        .unwrap_or("PostgreSQL connection error");
+                    HookError::message(format!(
+                        "failed to initialize PostgreSQL time zone {time_zone:?}: {message}"
+                    ))
+                })
             })
         }));
     }

@@ -114,6 +114,10 @@ Initialization runs once when PostgreSQL opens the connection, not every time
 the pool lends that connection to a query. Reusing an initialized connection
 therefore adds no initialization query.
 
+The native executor captures the resolved time zone when it first creates its
+pool. Changing Django time-zone settings at runtime does not reconfigure an
+existing native pool.
+
 The pool does not currently reset arbitrary session changes before reuse.
 Applications must not rely on standalone queries preserving `SET ROLE`,
 `search_path`, temporary tables, listeners, session advisory locks, or other

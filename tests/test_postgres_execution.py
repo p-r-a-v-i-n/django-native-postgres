@@ -2677,3 +2677,22 @@ async def test_pool_initializes_every_connection_time_zone(
         if second_transaction is not None:
             await _native.rollback_transaction(second_transaction)
         await _native.close_pool(pool)
+
+
+@pytest.mark.asyncio
+async def test_pool_rejects_invalid_connection_time_zone(
+    postgres_database_url,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        time_zone="Invalid/TimeZone",
+    )
+
+    try:
+        with pytest.raises(
+            _native.PostgresOperationalError,
+            match="failed to initialize PostgreSQL time zone",
+        ):
+            await _native.execute(pool=pool, sql="SELECT 1::BIGINT")
+    finally:
+        await _native.close_pool(pool)

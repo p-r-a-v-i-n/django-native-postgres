@@ -12,6 +12,7 @@ from django.db.models.deletion import ProtectedError, RestrictedError
 from django.db.models.signals import m2m_changed, post_delete, pre_delete, pre_save
 from django.db.transaction import TransactionManagementError
 from django_native_postgres import _native
+from django_native_postgres.base import DatabaseWrapper
 from psycopg.conninfo import make_conninfo
 
 from tests.integration_app.models import (
@@ -136,6 +137,22 @@ async def test_django_connection_executes_compiled_query_through_native_executor
     _, sql, params = compiled_book_query
     rows = await connections["default"].aexecute(sql, params)
     assert rows == [["Django"]]
+
+
+@pytest.mark.asyncio
+async def test_django_database_time_zone_initializes_native_connection():
+    settings_dict = {
+        **connections["default"].settings_dict,
+        "TIME_ZONE": "Asia/Kolkata",
+    }
+    connection = DatabaseWrapper(settings_dict, alias="time_zone_test")
+    executor = connection.get_async_executor()
+
+    try:
+        rows = await connection.aexecute("SELECT current_setting('TimeZone')")
+        assert rows == [["Asia/Kolkata"]]
+    finally:
+        await executor.close()
 
 
 @pytest.mark.asyncio
