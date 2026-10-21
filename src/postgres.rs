@@ -1,7 +1,8 @@
 use crate::error::NativeError;
 use crate::parameter::QueryParameters;
+use crate::session_reset::SessionReset;
 use crate::tls::{SslMode, TlsConnector};
-use deadpool_postgres::{Hook, HookError, Manager, ManagerConfig, Object, Pool, RecyclingMethod};
+use deadpool_postgres::{ClientWrapper, Hook, HookError, Manager, ManagerConfig, Object, Pool};
 use futures_util::TryStreamExt;
 use pyo3::prelude::*;
 use std::time::Duration;
@@ -105,10 +106,16 @@ pub(crate) fn create_pool(
     ssl_mode: SslMode,
     ssl_root_cert: Option<&str>,
     time_zone: Option<&str>,
+    session_reset: SessionReset,
 ) -> Result<PostgresPool, NativeError> {
     let mut postgres_config: tokio_postgres::Config =
         database_url.parse().map_err(NativeError::PostgresConnect)?;
     postgres_config.ssl_mode(ssl_mode.postgres_mode());
+    if session_reset.restores_session()
+        && let Some(time_zone) = time_zone
+    {
+        append_startup_time_zone(&mut postgres_config, time_zone);
+    }
 
     let tls = TlsConnector::new(ssl_mode, ssl_root_cert)?;
     let manager = match &tls {
@@ -116,14 +123,14 @@ pub(crate) fn create_pool(
             postgres_config,
             NoTls,
             ManagerConfig {
-                recycling_method: RecyclingMethod::Fast,
+                recycling_method: session_reset.recycling_method(),
             },
         ),
         TlsConnector::Rustls(connector) => Manager::from_config(
             postgres_config,
             connector.clone(),
             ManagerConfig {
-                recycling_method: RecyclingMethod::Fast,
+                recycling_method: session_reset.recycling_method(),
             },
         ),
     };
@@ -134,25 +141,7 @@ pub(crate) fn create_pool(
         .runtime(deadpool_postgres::Runtime::Tokio1);
 
     if let Some(time_zone) = time_zone {
-        let time_zone = time_zone.to_owned();
-        pool_builder = pool_builder.post_create(Hook::async_fn(move |client, _metrics| {
-            let time_zone = time_zone.clone();
-            Box::pin(async move {
-                let result = client
-                    .query_one("SELECT set_config('TimeZone', $1, false)", &[&time_zone])
-                    .await;
-
-                result.map(|_row| ()).map_err(|error| {
-                    let message = error
-                        .as_db_error()
-                        .map(|database_error| database_error.message())
-                        .unwrap_or("PostgreSQL connection error");
-                    HookError::message(format!(
-                        "failed to initialize PostgreSQL time zone {time_zone:?}: {message}"
-                    ))
-                })
-            })
-        }));
+        pool_builder = pool_builder.post_create(time_zone_hook(time_zone.to_owned()));
     }
 
     let pool = pool_builder
@@ -160,6 +149,50 @@ pub(crate) fn create_pool(
         .map_err(|error| NativeError::PostgresPoolBuild(error.to_string()))?;
 
     Ok(PostgresPool { pool, tls })
+}
+
+fn append_startup_time_zone(config: &mut tokio_postgres::Config, time_zone: &str) {
+    let mut options = config.get_options().unwrap_or_default().to_owned();
+    if !options.is_empty() {
+        options.push(' ');
+    }
+    options.push_str("-c TimeZone=");
+    options.push_str(&escape_startup_option_value(time_zone));
+    config.options(options);
+}
+
+fn escape_startup_option_value(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character == '\\' || character.is_whitespace() {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
+fn time_zone_hook(time_zone: String) -> Hook {
+    Hook::async_fn(move |client, _metrics| {
+        let time_zone = time_zone.clone();
+        Box::pin(async move { set_time_zone(client, &time_zone).await })
+    })
+}
+
+async fn set_time_zone(client: &ClientWrapper, time_zone: &str) -> Result<(), HookError> {
+    client
+        .query_one("SELECT set_config('TimeZone', $1, false)", &[&time_zone])
+        .await
+        .map(|_row| ())
+        .map_err(|error| {
+            let message = error
+                .as_db_error()
+                .map(|database_error| database_error.message())
+                .unwrap_or("PostgreSQL connection error");
+            HookError::message(format!(
+                "failed to initialize PostgreSQL time zone {time_zone:?}: {message}"
+            ))
+        })
 }
 
 pub(crate) async fn execute_on_client<C>(
@@ -330,4 +363,35 @@ pub(crate) async fn execute(
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{append_startup_time_zone, escape_startup_option_value};
+
+    #[test]
+    fn startup_option_value_preserves_plain_time_zone() {
+        assert_eq!(escape_startup_option_value("Asia/Kolkata"), "Asia/Kolkata");
+    }
+
+    #[test]
+    fn startup_option_value_escapes_separators() {
+        assert_eq!(
+            escape_startup_option_value("one two\\three"),
+            "one\\ two\\\\three"
+        );
+    }
+
+    #[test]
+    fn startup_time_zone_keeps_existing_options() {
+        let mut config = tokio_postgres::Config::new();
+        config.options("-c statement_timeout=1000");
+
+        append_startup_time_zone(&mut config, "Asia/Kolkata");
+
+        assert_eq!(
+            config.get_options(),
+            Some("-c statement_timeout=1000 -c TimeZone=Asia/Kolkata")
+        );
+    }
 }

@@ -31,6 +31,7 @@ pub(crate) enum NativeError {
     QueryStreamHandleClosed,
     QueryStreamHandleProcessMismatch,
     InvalidQueryStreamFetchSize,
+    InvalidSessionReset(String),
     QueryCancelled {
         connection_can_be_reused: bool,
     },
@@ -139,6 +140,12 @@ impl std::fmt::Display for NativeError {
                 write!(
                     formatter,
                     "query stream fetch size must be greater than zero"
+                )
+            }
+            Self::InvalidSessionReset(value) => {
+                write!(
+                    formatter,
+                    "unsupported PostgreSQL session reset mode: {value}"
                 )
             }
             Self::QueryCancelled { .. } => {

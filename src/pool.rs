@@ -1,4 +1,5 @@
 use crate::error::NativeError;
+use crate::session_reset::SessionReset;
 use crate::tls::SslMode;
 use pyo3::prelude::*;
 use std::sync::Arc;
@@ -16,6 +17,7 @@ pub(crate) struct PoolHandle {
     pub(crate) ssl_mode: SslMode,
     pub(crate) ssl_root_cert: Option<String>,
     pub(crate) time_zone: Option<String>,
+    pub(crate) session_reset: SessionReset,
     closed: Arc<AtomicBool>,
 }
 
@@ -27,6 +29,7 @@ impl PoolHandle {
         ssl_mode: String,
         ssl_root_cert: Option<String>,
         time_zone: Option<String>,
+        session_reset: String,
     ) -> Result<Self, NativeError> {
         if max_size == 0 {
             return Err(NativeError::InvalidPoolMaxSize);
@@ -38,6 +41,7 @@ impl PoolHandle {
             .ok_or(NativeError::InvalidPoolWaitTimeout)?;
 
         let ssl_mode = SslMode::parse(ssl_mode)?;
+        let session_reset = SessionReset::parse(session_reset)?;
         Ok(Self {
             id: NEXT_POOL_ID.fetch_add(1, Ordering::Relaxed),
             database_url,
@@ -46,6 +50,7 @@ impl PoolHandle {
             ssl_mode,
             ssl_root_cert,
             time_zone,
+            session_reset,
             closed: Arc::new(AtomicBool::new(false)),
         })
     }

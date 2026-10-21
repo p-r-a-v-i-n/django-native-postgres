@@ -2515,6 +2515,28 @@ def test_create_pool_rejects_invalid_ssl_mode(postgres_database_url):
         )
 
 
+def test_create_pool_rejects_invalid_session_reset(postgres_database_url):
+    with pytest.raises(
+        ValueError,
+        match="unsupported PostgreSQL session reset mode: invalid",
+    ):
+        _native.create_pool(
+            database_url=postgres_database_url,
+            session_reset="invalid",
+        )
+
+
+@pytest.mark.parametrize("session_reset", ["fast", "clean"])
+def test_create_pool_accepts_supported_session_reset_modes(
+    postgres_database_url,
+    session_reset,
+):
+    _native.create_pool(
+        database_url=postgres_database_url,
+        session_reset=session_reset,
+    )
+
+
 @pytest.mark.parametrize("ssl_mode", ["disable", "prefer", "require"])
 def test_create_pool_accepts_supported_ssl_modes(
     postgres_database_url,
@@ -2694,5 +2716,85 @@ async def test_pool_rejects_invalid_connection_time_zone(
             match="failed to initialize PostgreSQL time zone",
         ):
             await _native.execute(pool=pool, sql="SELECT 1::BIGINT")
+    finally:
+        await _native.close_pool(pool)
+
+
+@pytest.mark.asyncio
+async def test_fast_session_reset_preserves_session_changes(
+    postgres_database_url,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        session_reset="fast",
+    )
+
+    try:
+        await _native.execute(
+            pool=pool,
+            sql="SELECT set_config('application_name', 'changed', false)",
+        )
+
+        assert await _native.execute(
+            pool=pool,
+            sql="SELECT current_setting('application_name')",
+        ) == [["changed"]]
+    finally:
+        await _native.close_pool(pool)
+
+
+@pytest.mark.asyncio
+async def test_clean_session_reset_removes_session_changes(
+    postgres_database_url,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        session_reset="clean",
+    )
+
+    try:
+        initial_value = await _native.execute(
+            pool=pool,
+            sql="SELECT current_setting('application_name')",
+        )
+        await _native.execute(
+            pool=pool,
+            sql="SELECT set_config('application_name', 'changed', false)",
+        )
+
+        assert (
+            await _native.execute(
+                pool=pool,
+                sql="SELECT current_setting('application_name')",
+            )
+            == initial_value
+        )
+    finally:
+        await _native.close_pool(pool)
+
+
+@pytest.mark.asyncio
+async def test_clean_session_reset_restores_connection_time_zone(
+    postgres_database_url,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        time_zone="Asia/Kolkata",
+        session_reset="clean",
+    )
+
+    try:
+        await _native.execute(
+            pool=pool,
+            sql="SELECT set_config('TimeZone', 'UTC', false)",
+        )
+
+        assert await _native.execute(
+            pool=pool,
+            sql="SELECT current_setting('TimeZone')",
+        ) == [["Asia/Kolkata"]]
     finally:
         await _native.close_pool(pool)

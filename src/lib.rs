@@ -20,6 +20,7 @@ mod pool;
 mod postgres;
 mod query_stream;
 mod runtime;
+mod session_reset;
 mod tls;
 mod transaction;
 mod transaction_options;
@@ -34,7 +35,7 @@ async fn runtime_probe(delay_ms: u64) -> PyResult<u64> {
     runtime::probe(delay_ms).await.map_err(to_python_error)
 }
 
-#[pyfunction(signature=(database_url, max_size=16, wait_timeout_ms=30_000, ssl_mode="prefer", ssl_root_cert=None, time_zone=None))]
+#[pyfunction(signature=(database_url, max_size=16, wait_timeout_ms=30_000, ssl_mode="prefer", ssl_root_cert=None, time_zone=None, session_reset="fast"))]
 fn create_pool(
     database_url: String,
     max_size: usize,
@@ -42,6 +43,7 @@ fn create_pool(
     ssl_mode: &str,
     ssl_root_cert: Option<String>,
     time_zone: Option<String>,
+    session_reset: &str,
 ) -> PyResult<pool::PoolHandle> {
     pool::PoolHandle::new(
         database_url,
@@ -50,6 +52,7 @@ fn create_pool(
         ssl_mode.to_owned(),
         ssl_root_cert,
         time_zone,
+        session_reset.to_owned(),
     )
     .map_err(to_python_error)
 }
@@ -398,7 +401,8 @@ fn to_python_error(error: NativeError) -> PyErr {
         }
         error @ (NativeError::InvalidTransactionIsolationLevel(_)
         | NativeError::InvalidQueryStreamFetchSize
-        | NativeError::InvalidSslMode(_)) => PyValueError::new_err(error.to_string()),
+        | NativeError::InvalidSslMode(_)
+        | NativeError::InvalidSessionReset(_)) => PyValueError::new_err(error.to_string()),
         error => PyRuntimeError::new_err(error.to_string()),
     }
 }

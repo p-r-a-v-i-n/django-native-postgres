@@ -115,6 +115,7 @@ def test_database_wrapper_builds_and_caches_native_executor():
             "native_pool": {
                 "max_size": 4,
                 "wait_timeout_ms": 250,
+                "session_reset": "clean",
             },
         },
     }
@@ -136,6 +137,7 @@ def test_database_wrapper_builds_and_caches_native_executor():
     create_pool.assert_called_once()
     assert create_pool.call_args.kwargs["max_size"] == 4
     assert create_pool.call_args.kwargs["wait_timeout_ms"] == 250
+    assert create_pool.call_args.kwargs["session_reset"] == "clean"
     assert create_pool.call_args.kwargs["time_zone"] == "UTC"
     assert conninfo_to_dict(create_pool.call_args.kwargs["database_url"]) == {
         "dbname": "example_database",
@@ -214,6 +216,25 @@ def test_database_wrapper_rejects_invalid_pool_wait_timeout(wait_timeout_ms):
     with pytest.raises(
         ImproperlyConfigured,
         match=r"native_pool\.wait_timeout_ms must be a positive integer",
+    ):
+        connection.get_async_executor()
+
+
+@pytest.mark.parametrize("session_reset", ["invalid", "verified", None, True])
+def test_database_wrapper_rejects_invalid_pool_session_reset(session_reset):
+    setting_dict = {
+        **connections["default"].settings_dict,
+        "OPTIONS": {
+            "native_pool": {
+                "session_reset": session_reset,
+            },
+        },
+    }
+    connection = DatabaseWrapper(setting_dict, alias="default")
+
+    with pytest.raises(
+        ImproperlyConfigured,
+        match=r"native_pool\.session_reset must be 'fast' or 'clean'",
     ):
         connection.get_async_executor()
 
@@ -444,6 +465,7 @@ async def test_native_executor_forwards_query_to_native_extension():
         ssl_mode="prefer",
         ssl_root_cert=None,
         time_zone=None,
+        session_reset="fast",
     )
     execute.assert_awaited_once_with(
         pool=pool,
