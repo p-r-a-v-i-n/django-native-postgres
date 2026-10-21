@@ -232,6 +232,7 @@ async fn get_or_create_pool(
         handle.wait_timeout_ms,
         handle.ssl_mode,
         handle.ssl_root_cert.as_deref(),
+        handle.time_zone.as_deref(),
     )?;
 
     // Closing can race with the first pool creation.

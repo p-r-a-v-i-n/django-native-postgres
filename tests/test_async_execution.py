@@ -136,6 +136,7 @@ def test_database_wrapper_builds_and_caches_native_executor():
     create_pool.assert_called_once()
     assert create_pool.call_args.kwargs["max_size"] == 4
     assert create_pool.call_args.kwargs["wait_timeout_ms"] == 250
+    assert create_pool.call_args.kwargs["time_zone"] == "UTC"
     assert conninfo_to_dict(create_pool.call_args.kwargs["database_url"]) == {
         "dbname": "example_database",
         "user": "example_user",
@@ -442,6 +443,7 @@ async def test_native_executor_forwards_query_to_native_extension():
         wait_timeout_ms=250,
         ssl_mode="prefer",
         ssl_root_cert=None,
+        time_zone=None,
     )
     execute.assert_awaited_once_with(
         pool=pool,
@@ -1503,3 +1505,25 @@ def test_database_wrapper_forwards_tls_options():
 
     assert create_pool.call_args.kwargs["ssl_mode"] == "require"
     assert create_pool.call_args.kwargs["ssl_root_cert"] == "/certs/postgres-ca.pem"
+
+
+def test_database_wrapper_forwards_configured_time_zone():
+    settings_dict = {
+        "ENGINE": "django_native_postgres",
+        "NAME": "example_database",
+        "USER": "example_user",
+        "PASSWORD": "example_password",
+        "HOST": "database.example.com",
+        "PORT": "5432",
+        "TIME_ZONE": "Asia/Kolkata",
+        "OPTIONS": {},
+    }
+    connection = DatabaseWrapper(settings_dict, alias="default")
+
+    with mock.patch(
+        "django_native_postgres.executor._native.create_pool",
+        return_value=object(),
+    ) as create_pool:
+        connection.get_async_executor()
+
+    assert create_pool.call_args.kwargs["time_zone"] == "Asia/Kolkata"

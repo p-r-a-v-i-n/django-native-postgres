@@ -104,6 +104,7 @@ pub(crate) fn create_pool(
     pool_wait_timeout_ms: u64,
     ssl_mode: SslMode,
     ssl_root_cert: Option<&str>,
+    _time_zone: Option<&str>,
 ) -> Result<PostgresPool, NativeError> {
     let mut postgres_config: tokio_postgres::Config =
         database_url.parse().map_err(NativeError::PostgresConnect)?;
