@@ -20,6 +20,7 @@ DATABASES = {
             "native_pool": {
                 "max_size": 16,
                 "wait_timeout_ms": 30_000,
+                "session_reset": "fast",
             },
         },
     },
@@ -54,6 +55,26 @@ native pool.
 - Required type: positive integer
 
 This is not a PostgreSQL statement timeout. It limits only pool acquisition.
+
+### `session_reset`
+
+Controls how a connection is prepared before the pool lends it to another
+operation.
+
+- `fast` checks that the connection is open without running a cleanup query.
+  This is the default and has the lowest checkout overhead.
+- `clean` closes cursors, restores session authorization and settings, removes
+  listeners and temporary objects, and releases session advisory locks before
+  reuse. It adds one PostgreSQL round trip to a reused connection checkout.
+
+Use `fast` when the application uses normal ORM operations and keeps custom
+state transaction-local. Code using persistent `SET`, `SET ROLE`, temporary
+tables, `LISTEN`, or session advisory locks must either undo that state itself
+or use `clean`.
+
+This option does not control failed-query and cancellation safety. Connections
+whose protocol state is uncertain are always discarded, and native
+transactions are always completed or rolled back before reuse.
 
 ## TLS options
 
@@ -108,7 +129,8 @@ native support before they can be documented as compatible.
 
 Every newly created physical connection is initialized with
 `DatabaseWrapper.timezone_name`. Django resolves this from `USE_TZ`, the
-project `TIME_ZONE`, and the database `TIME_ZONE` setting.
+project `TIME_ZONE`, and the database `TIME_ZONE` setting. In `clean` mode the
+time zone is also a connection-start default, so session reset restores it.
 
 Initialization runs once when PostgreSQL opens the connection, not every time
 the pool lends that connection to a query. Reusing an initialized connection
@@ -118,12 +140,12 @@ The native executor captures the resolved time zone when it first creates its
 pool. Changing Django time-zone settings at runtime does not reconfigure an
 existing native pool.
 
-The pool does not currently reset arbitrary session changes before reuse.
-Applications must not rely on standalone queries preserving `SET ROLE`,
-`search_path`, temporary tables, listeners, session advisory locks, or other
-session-local state. Transaction-specific settings should use `SET LOCAL`
-inside `transaction.atomic()` so PostgreSQL removes them when the transaction
-ends.
+With the default `fast` mode, applications must not let standalone queries
+leave behind `SET ROLE`, `search_path`, temporary tables, listeners, session
+advisory locks, or other session-local state. Transaction-specific settings
+should use `SET LOCAL` inside `transaction.atomic()` so PostgreSQL removes them
+when the transaction ends. Use `clean` when arbitrary session changes cannot
+be excluded.
 
 ## Standard Django settings not yet applied to native connections
 

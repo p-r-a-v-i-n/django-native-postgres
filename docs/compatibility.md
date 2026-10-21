@@ -92,9 +92,11 @@ database time zone. The pool does not yet reproduce other PostgreSQL session
 settings that Django and Psycopg may configure, including roles, search paths,
 and custom connection options.
 
-Arbitrary session changes are not reset before a connection is reused. Session
-state that belongs to one operation should use `SET LOCAL` inside a transaction
-instead of a persistent `SET` command.
+The default fast pool mode does not reset arbitrary session changes before a
+connection is reused. Session state that belongs to one operation should use
+`SET LOCAL` inside a transaction instead of a persistent `SET` command. An
+opt-in clean mode is available for applications that cannot exclude persistent
+session changes.
 
 ### Test breadth
 

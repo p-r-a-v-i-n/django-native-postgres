@@ -42,7 +42,8 @@ validation rules.
 
 `max_size` is the maximum number of physical connections owned by this handle.
 `wait_timeout_ms` limits how long an operation waits to borrow a connection
-when the pool is exhausted. Both must be positive integers.
+when the pool is exhausted. Both must be positive integers. `session_reset`
+selects fast reuse or opt-in cleanup of PostgreSQL session state.
 
 `max_size` is not a whole-application limit. Separate database wrappers,
 aliases, and worker processes own separate pools. The possible total is the
@@ -50,6 +51,12 @@ sum of every pool's maximum across every running process; for equally sized
 pools, this is roughly `max_size * handles per process * worker processes`.
 
 The pool wait timeout does not limit PostgreSQL statement execution time.
+
+Fast reuse does not issue a query during connection checkout. Clean reuse adds
+one cleanup round trip and restores Django's configured time zone before the
+connection reaches the next operation. Query failures and cancellations use
+the same safety rules in both modes: a connection is reused only when its
+protocol state is known to be safe.
 
 ## Autocommit query lifecycle
 
@@ -228,7 +235,7 @@ Work still in progress includes:
 
 - client certificates and additional TLS options;
 - complete PostgreSQL connection options;
-- broader session initialization and reset rules;
+- session settings beyond the database time zone;
 - idle connection and maximum-lifetime policies;
 - integration with Django wrapper and process shutdown;
 - metrics and tracing hooks; and
