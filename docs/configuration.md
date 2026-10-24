@@ -21,6 +21,7 @@ DATABASES = {
                 "max_size": 16,
                 "wait_timeout_ms": 30_000,
                 "session_reset": "fast",
+                "reset_timeout_ms": 5_000,
             },
         },
     },
@@ -58,14 +59,18 @@ This is not a PostgreSQL statement timeout. It limits only pool acquisition.
 
 ### `session_reset`
 
-Controls how a connection is prepared before the pool lends it to another
-operation.
+Controls what happens before a healthy connection is returned to the pool.
 
-- `fast` checks that the connection is open without running a cleanup query.
-  This is the default and has the lowest checkout overhead.
+- `fast` returns the connection without running a cleanup query. This is the
+  default and has the lowest overhead.
 - `clean` closes cursors, restores session authorization and settings, removes
   listeners and temporary objects, and releases session advisory locks before
-  reuse. It adds one PostgreSQL round trip to a reused connection checkout.
+  the connection becomes idle. It adds one PostgreSQL round trip to each
+  physical connection lease.
+
+A lease is one autocommit operation, one complete query-stream lifetime, or
+one complete transaction. Queries and savepoints inside the same transaction
+do not each run the cleanup query.
 
 Use `fast` when the application uses normal ORM operations and keeps custom
 state transaction-local. Code using persistent `SET`, `SET ROLE`, temporary
@@ -75,6 +80,19 @@ or use `clean`.
 This option does not control failed-query and cancellation safety. Connections
 whose protocol state is uncertain are always discarded, and native
 transactions are always completed or rolled back before reuse.
+
+### `reset_timeout_ms`
+
+Maximum time allowed for the cleanup query used by `session_reset="clean"`.
+
+- Default: `5_000`
+- Required type: positive integer
+
+If cleanup fails or exceeds this timeout, the connection is discarded instead
+of being returned to the pool. A query or transaction that already completed
+successfully remains successful; cleanup failure does not turn it into an
+error that an application might retry. This option has no effect in `fast`
+mode.
 
 ## TLS options
 

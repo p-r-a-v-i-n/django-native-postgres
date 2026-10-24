@@ -110,9 +110,9 @@ Run the pool recycling benchmark with:
 just benchmark-session-reset
 ```
 
-It compares Deadpool's fast recycling method with its clean method, which runs
-a cleanup query before reusing a connection. The output includes throughput
-and p50 and p95 operation latency.
+It compares fast return with the backend's clean return behavior. Clean mode
+runs the session cleanup query before returning each connection to the pool.
+The output includes throughput and p50 and p95 operation latency.
 
 The optional arguments are operations per method per round, concurrency (and
 pool size), and number of rounds:
