@@ -125,15 +125,13 @@ DATABASES = {
         "PASSWORD": "secret",
         "HOST": "127.0.0.1",
         "PORT": "5432",
-        "OPTIONS": {
-            "native_pool": {
-                "max_size": 16,
-                "wait_timeout_ms": 30_000,
-            },
-        },
     }
 }
 ```
+
+The backend-specific pool and TLS settings are optional. Their defaults and
+configuration examples are described in
+[Configuration](docs/configuration.md).
 
 Supported Django async ORM calls then use the native backend path:
 
@@ -144,9 +142,6 @@ from your_app.models import Book
 async def find_book(book_id):
     return await Book.objects.aget(pk=book_id)
 ```
-
-The complete configuration surface is described in
-[Configuration](docs/configuration.md).
 
 Run formatting, linting, Rust checks, and tests that do not require a live
 PostgreSQL server:

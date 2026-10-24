@@ -36,9 +36,9 @@ a connection.
 
 ## Configuration
 
-Pool configuration is read from `OPTIONS["native_pool"]`. See
-[Configuration](configuration.md) for the complete `DATABASES` example and
-validation rules.
+Optional pool configuration is read from `OPTIONS["native_pool"]`. Omitting
+the mapping uses the defaults. See [Configuration](configuration.md) for
+examples and validation rules.
 
 `max_size` is the maximum number of physical connections owned by this handle.
 `wait_timeout_ms` limits how long an operation waits to borrow a connection

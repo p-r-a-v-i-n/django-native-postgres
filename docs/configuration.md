@@ -1,9 +1,9 @@
 # Configuration
 
-The backend uses Django's normal `DATABASES` setting and adds a small native
-pool configuration section.
+The backend uses Django's normal `DATABASES` setting. Native pool and TLS
+settings are optional.
 
-## Database engine
+## Basic configuration
 
 ```python
 DATABASES = {
@@ -14,24 +14,42 @@ DATABASES = {
         "PASSWORD": "secret",
         "HOST": "127.0.0.1",
         "PORT": "5432",
-        "OPTIONS": {
-            "sslmode": "require",
-            "sslrootcert": "/etc/ssl/postgres-ca.pem",
-            "native_pool": {
-                "max_size": 16,
-                "wait_timeout_ms": 30_000,
-                "session_reset": "fast",
-                "reset_timeout_ms": 5_000,
-            },
-        },
     },
 }
 ```
 
+No backend-specific `OPTIONS` are required. `NAME`, `USER`, `PASSWORD`,
+`HOST`, and `PORT` are normal Django PostgreSQL connection settings; configure
+them for the PostgreSQL server being used.
+
 The package must be importable and the application must use the compatible
 Django fork described in [Django fork requirement](django-fork.md).
 
+## Optional settings
+
+Add only the settings the application needs:
+
+```python
+DATABASES["default"]["OPTIONS"] = {
+    "sslmode": "require",
+    "sslrootcert": "/etc/ssl/postgres-ca.pem",
+    "native_pool": {
+        "max_size": 32,
+        "wait_timeout_ms": 10_000,
+        "session_reset": "clean",
+        "reset_timeout_ms": 2_000,
+    },
+}
+```
+
+This example changes every available option to demonstrate where it belongs.
+It is not a recommended configuration for every application. Defaults and
+tradeoffs are documented below.
+
 ## Native pool options
+
+The complete `native_pool` mapping is optional. When it is omitted, all pool
+options use their defaults.
 
 ### `max_size`
 
@@ -95,6 +113,9 @@ error that an application might retry. This option has no effect in `fast`
 mode.
 
 ## TLS options
+
+Both TLS settings are optional. The default is `sslmode="prefer"` with the
+operating system's root certificates.
 
 ### `sslmode`
 
