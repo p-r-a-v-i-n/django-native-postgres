@@ -31,6 +31,11 @@ enum StreamNextRow {
     Cancelled,
 }
 
+type TransactionCompletion = (
+    oneshot::Sender<Result<(), NativeError>>,
+    Result<(), NativeError>,
+);
+
 pub(crate) enum TransactionCommand {
     Execute {
         sql: String,
@@ -111,7 +116,7 @@ pub(crate) async fn begin(
 
     tokio::spawn(run_transaction(
         client,
-        pool.tls().clone(),
+        pool.clone(),
         options,
         cancellation,
         receiver,
@@ -209,12 +214,35 @@ pub(crate) async fn rollback(handle: TransactionHandle) -> Result<(), NativeErro
 
 async fn run_transaction(
     mut client: Object,
+    pool: PostgresPool,
+    options: TransactionOptions,
+    cancellation: oneshot::Receiver<()>,
+    receiver: mpsc::Receiver<TransactionCommand>,
+    ready: oneshot::Sender<Result<(), NativeError>>,
+) {
+    let (connection_can_be_reused, completion) = run_transaction_on_client(
+        &mut client,
+        pool.tls().clone(),
+        options,
+        cancellation,
+        receiver,
+        ready,
+    )
+    .await;
+    pool.release(client, connection_can_be_reused).await;
+    if let Some((response, result)) = completion {
+        let _ = response.send(result);
+    }
+}
+
+async fn run_transaction_on_client(
+    client: &mut Object,
     tls: TlsConnector,
     options: TransactionOptions,
     mut cancellation: oneshot::Receiver<()>,
     mut receiver: mpsc::Receiver<TransactionCommand>,
     ready: oneshot::Sender<Result<(), NativeError>>,
-) {
+) -> (bool, Option<TransactionCompletion>) {
     let cancel_token = client.cancel_token();
     let mut builder = client.build_transaction();
 
@@ -236,11 +264,13 @@ async fn run_transaction(
             match result {
                 Ok(transaction) => transaction,
                 Err(source) => {
+                    let connection_can_be_reused =
+                        postgres::query_error_allows_connection_reuse(&source);
                     let _ = ready.send(Err(NativeError::PostgresTransaction {
                         operation: "begin",
                         source,
                     }));
-                    return;
+                    return (connection_can_be_reused, None);
                 }
             }
         }
@@ -254,17 +284,18 @@ async fn run_transaction(
             // the start future returns.
             clean_up_cancelled_start(start_result).await;
 
+            let connection_can_be_reused = cancellation_result.is_ok();
             let error = match cancellation_result {
                 Ok(()) => NativeError::TransactionStartCancelled,
                 Err(source) => NativeError::PostgresCancel(source),
             };
             let _ = ready.send(Err(error));
-            return;
+            return (connection_can_be_reused, None);
         }
     };
 
     if ready.send(Ok(())).is_err() {
-        return;
+        return (true, None);
     }
 
     let mut queued_command = None;
@@ -274,7 +305,7 @@ async fn run_transaction(
             Some(command) => command,
             None => {
                 let Some(command) = receiver.recv().await else {
-                    return;
+                    return (true, None);
                 };
                 command
             }
@@ -308,7 +339,7 @@ async fn run_transaction(
                 let _ = response.send(result);
 
                 if !connection_can_be_reused {
-                    return;
+                    return (false, None);
                 }
             }
             TransactionCommand::OpenQueryStream {
@@ -335,7 +366,7 @@ async fn run_transaction(
                             && !transaction.client().is_closed();
                         let _ = response.send(Err(error));
                         if !connection_can_be_reused {
-                            return;
+                            return (false, None);
                         }
                         continue;
                     }
@@ -355,7 +386,7 @@ async fn run_transaction(
                         && !transaction.client().is_closed();
                     let _ = response.send(result);
                     if !connection_can_be_reused {
-                        return;
+                        return (false, None);
                     }
                     continue;
                 }
@@ -386,7 +417,7 @@ async fn run_transaction(
                     TransactionStreamExit::Queued(command) => {
                         queued_command = Some(command);
                     }
-                    TransactionStreamExit::Stop => return,
+                    TransactionStreamExit::Stop => return (false, None),
                 }
             }
             TransactionCommand::Commit { response } => {
@@ -398,8 +429,8 @@ async fn run_transaction(
                             operation: "commit",
                             source,
                         });
-                let _ = response.send(result);
-                return;
+                let connection_can_be_reused = result.is_ok();
+                return (connection_can_be_reused, Some((response, result)));
             }
             TransactionCommand::Rollback { response } => {
                 let result = transaction.rollback().await.map_err(|source| {
@@ -408,8 +439,8 @@ async fn run_transaction(
                         source,
                     }
                 });
-                let _ = response.send(result);
-                return;
+                let connection_can_be_reused = result.is_ok();
+                return (connection_can_be_reused, Some((response, result)));
             }
         }
     }

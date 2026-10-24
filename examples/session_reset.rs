@@ -12,6 +12,29 @@ struct Measurement {
     elapsed: Duration,
 }
 
+#[derive(Clone, Copy)]
+enum SessionReset {
+    Fast,
+    Clean,
+}
+
+impl SessionReset {
+    fn cleanup_query(self) -> Option<&'static str> {
+        match self {
+            Self::Fast => None,
+            Self::Clean => Some(
+                "CLOSE ALL; \
+                 SET SESSION AUTHORIZATION DEFAULT; \
+                 RESET ALL; \
+                 UNLISTEN *; \
+                 SELECT pg_advisory_unlock_all(); \
+                 DISCARD TEMP; \
+                 DISCARD SEQUENCES;",
+            ),
+        }
+    }
+}
+
 impl Measurement {
     fn new() -> Self {
         Self {
@@ -47,13 +70,15 @@ fn parse_argument(name: &str, position: usize, default: usize) -> Result<usize, 
     Ok(value)
 }
 
-fn create_pool(
-    database_url: &str,
-    max_size: usize,
-    recycling_method: RecyclingMethod,
-) -> Result<Pool, BenchmarkError> {
+fn create_pool(database_url: &str, max_size: usize) -> Result<Pool, BenchmarkError> {
     let postgres_config = database_url.parse()?;
-    let manager = Manager::from_config(postgres_config, NoTls, ManagerConfig { recycling_method });
+    let manager = Manager::from_config(
+        postgres_config,
+        NoTls,
+        ManagerConfig {
+            recycling_method: RecyclingMethod::Fast,
+        },
+    );
     Ok(Pool::builder(manager)
         .max_size(max_size)
         .runtime(Runtime::Tokio1)
@@ -62,6 +87,7 @@ fn create_pool(
 
 async fn run_operations(
     pool: &Pool,
+    session_reset: SessionReset,
     operation_count: usize,
     concurrency: usize,
 ) -> Result<Measurement, BenchmarkError> {
@@ -85,6 +111,9 @@ async fn run_operations(
                 let started = Instant::now();
                 let client = pool.get().await?;
                 client.query_one("SELECT 1::BIGINT", &[]).await?;
+                if let Some(cleanup_query) = session_reset.cleanup_query() {
+                    client.batch_execute(cleanup_query).await?;
+                }
                 drop(client);
                 durations.push(started.elapsed());
             }
@@ -106,14 +135,14 @@ async fn run_operations(
 
 async fn measure(
     database_url: &str,
-    recycling_method: RecyclingMethod,
+    session_reset: SessionReset,
     operation_count: usize,
     concurrency: usize,
 ) -> Result<Measurement, BenchmarkError> {
-    let pool = create_pool(database_url, concurrency, recycling_method)?;
+    let pool = create_pool(database_url, concurrency)?;
     let warmup_operations = 100.max(concurrency * 4);
-    run_operations(&pool, warmup_operations, concurrency).await?;
-    let measurement = run_operations(&pool, operation_count, concurrency).await?;
+    run_operations(&pool, session_reset, warmup_operations, concurrency).await?;
+    let measurement = run_operations(&pool, session_reset, operation_count, concurrency).await?;
     pool.close();
     Ok(measurement)
 }
@@ -142,7 +171,7 @@ async fn main() -> Result<(), BenchmarkError> {
             fast.add(
                 measure(
                     &database_url,
-                    RecyclingMethod::Fast,
+                    SessionReset::Fast,
                     operation_count,
                     concurrency,
                 )
@@ -151,7 +180,7 @@ async fn main() -> Result<(), BenchmarkError> {
             clean.add(
                 measure(
                     &database_url,
-                    RecyclingMethod::Clean,
+                    SessionReset::Clean,
                     operation_count,
                     concurrency,
                 )
@@ -161,7 +190,7 @@ async fn main() -> Result<(), BenchmarkError> {
             clean.add(
                 measure(
                     &database_url,
-                    RecyclingMethod::Clean,
+                    SessionReset::Clean,
                     operation_count,
                     concurrency,
                 )
@@ -170,7 +199,7 @@ async fn main() -> Result<(), BenchmarkError> {
             fast.add(
                 measure(
                     &database_url,
-                    RecyclingMethod::Fast,
+                    SessionReset::Fast,
                     operation_count,
                     concurrency,
                 )

@@ -491,6 +491,7 @@ class NativeExecutor:
         ssl_root_cert: str | None = None,
         time_zone: str | None = None,
         session_reset: str = "fast",
+        pool_reset_timeout_ms: int = 5_000,
     ):
         self.pool = _native.create_pool(
             database_url=database_url,
@@ -500,6 +501,7 @@ class NativeExecutor:
             ssl_root_cert=ssl_root_cert,
             time_zone=time_zone,
             session_reset=session_reset,
+            reset_timeout_ms=pool_reset_timeout_ms,
         )
         self._active_transaction: ContextVar[NativeTransaction | None] = ContextVar(
             "django_native_postgres_active_transaction",

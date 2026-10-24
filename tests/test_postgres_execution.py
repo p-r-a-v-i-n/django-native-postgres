@@ -1129,6 +1129,21 @@ def test_create_pool_rejects_invalid_wait_timeout(
         )
 
 
+@pytest.mark.parametrize("reset_timeout_ms", [0, -1])
+def test_create_pool_rejects_invalid_reset_timeout(
+    postgres_database_url,
+    reset_timeout_ms,
+):
+    with pytest.raises(
+        RuntimeError,
+        match="PostgreSQL session reset timeout must be a positive integer",
+    ):
+        _native.create_pool(
+            database_url=postgres_database_url,
+            reset_timeout_ms=reset_timeout_ms,
+        )
+
+
 @pytest.mark.asyncio
 async def test_execute_times_out_when_pool_is_exhausted(postgres_database_url):
     await _native.close_pools()
@@ -2801,20 +2816,181 @@ async def test_clean_session_reset_releases_session_resources(
             sql="SELECT count(*)::BIGINT FROM pg_listening_channels()",
         ) == [[0]]
 
-        await _native.execute(
-            pool=pool,
-            sql="SELECT 1::BIGINT FROM pg_advisory_lock(724019)",
-        )
-        assert await _native.execute(
-            pool=pool,
-            sql="""
-                SELECT count(*)::BIGINT
-                FROM pg_locks
-                WHERE pid = pg_backend_pid() AND locktype = 'advisory'
-            """,
-        ) == [[0]]
     finally:
         await _native.close_pool(pool)
+
+
+@pytest.mark.asyncio
+async def test_clean_session_reset_releases_advisory_lock_on_return(
+    postgres_database_url,
+):
+    target_pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        session_reset="clean",
+    )
+    observer_pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+    )
+
+    try:
+        rows = await _native.execute(
+            pool=target_pool,
+            sql="""
+                SELECT pg_backend_pid()::BIGINT
+                FROM pg_advisory_lock(pg_backend_pid()::BIGINT)
+            """,
+        )
+        lock_key = rows[0][0]
+
+        assert await observer_can_acquire_advisory_lock(observer_pool, lock_key)
+        assert await _get_backend_pid(target_pool) == lock_key
+    finally:
+        await _native.close_pool(target_pool)
+        await _native.close_pool(observer_pool)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("completion", ["commit", "rollback"])
+async def test_clean_session_reset_releases_transaction_advisory_lock(
+    postgres_database_url,
+    completion,
+):
+    target_pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        session_reset="clean",
+    )
+    observer_pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+    )
+    transaction = None
+
+    try:
+        transaction = await _native.begin_transaction(target_pool)
+        rows = await _native.execute_transaction(
+            transaction=transaction,
+            sql="""
+                SELECT pg_backend_pid()::BIGINT
+                FROM pg_advisory_lock(pg_backend_pid()::BIGINT)
+            """,
+        )
+        lock_key = rows[0][0]
+
+        if completion == "commit":
+            await _native.commit_transaction(transaction)
+        else:
+            await _native.rollback_transaction(transaction)
+        transaction = None
+
+        assert await observer_can_acquire_advisory_lock(observer_pool, lock_key)
+        assert await _get_backend_pid(target_pool) == lock_key
+    finally:
+        if transaction is not None:
+            await _native.rollback_transaction(transaction)
+        await _native.close_pool(target_pool)
+        await _native.close_pool(observer_pool)
+
+
+@pytest.mark.asyncio
+async def test_clean_session_reset_releases_stream_advisory_lock(
+    postgres_database_url,
+):
+    target_pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        session_reset="clean",
+    )
+    observer_pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+    )
+
+    try:
+        stream, _, _ = await _native.open_query_stream(
+            pool=target_pool,
+            sql="""
+                SELECT pg_backend_pid()::BIGINT
+                FROM pg_advisory_lock(pg_backend_pid()::BIGINT)
+            """,
+        )
+        rows = await _native.fetch_query_stream(stream, 2)
+        lock_key = rows[0][0]
+
+        assert await observer_can_acquire_advisory_lock(observer_pool, lock_key)
+        assert await _get_backend_pid(target_pool) == lock_key
+    finally:
+        await _native.close_pool(target_pool)
+        await _native.close_pool(observer_pool)
+
+
+@pytest.mark.asyncio
+async def test_clean_session_reset_releases_closed_stream_advisory_lock(
+    postgres_database_url,
+):
+    target_pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        session_reset="clean",
+    )
+    observer_pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+    )
+
+    try:
+        stream, _, _ = await _native.open_query_stream(
+            pool=target_pool,
+            sql="""
+                SELECT pg_backend_pid()::BIGINT
+                FROM pg_advisory_lock(pg_backend_pid()::BIGINT)
+
+                UNION ALL
+
+                SELECT pg_backend_pid()::BIGINT
+                FROM generate_series(1, 10000)
+
+                UNION ALL
+
+                SELECT pg_backend_pid()::BIGINT
+                FROM pg_sleep(5)
+            """,
+        )
+        rows = await _native.fetch_query_stream(stream, 1)
+        lock_key = rows[0][0]
+
+        await _native.close_query_stream(stream)
+
+        assert await observer_can_acquire_advisory_lock(observer_pool, lock_key)
+        assert await _get_backend_pid(target_pool) == lock_key
+    finally:
+        await _native.close_pool(target_pool)
+        await _native.close_pool(observer_pool)
+
+
+async def observer_can_acquire_advisory_lock(pool, lock_key):
+    result = await _native.execute(
+        pool=pool,
+        sql="""
+            SELECT CASE
+                WHEN pg_try_advisory_lock(%s) THEN 1::BIGINT
+                ELSE 0::BIGINT
+            END
+        """,
+        params=(lock_key,),
+    )
+    acquired = result == [[1]]
+
+    if acquired:
+        await _native.execute(
+            pool=pool,
+            sql="SELECT 1::BIGINT FROM pg_advisory_unlock(%s)",
+            params=(lock_key,),
+        )
+
+    return acquired
 
 
 @pytest.mark.asyncio

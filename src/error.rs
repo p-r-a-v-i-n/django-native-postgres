@@ -23,6 +23,7 @@ pub(crate) enum NativeError {
     },
     InvalidPoolMaxSize,
     InvalidPoolWaitTimeout,
+    InvalidPoolResetTimeout,
     InvalidTransactionIsolationLevel(String),
     PoolHandleClosed,
     TransactionStartCancelled,
@@ -98,6 +99,12 @@ impl std::fmt::Display for NativeError {
                 write!(
                     formatter,
                     "PostgreSQL pool wait timeout must be a positive integer"
+                )
+            }
+            Self::InvalidPoolResetTimeout => {
+                write!(
+                    formatter,
+                    "PostgreSQL session reset timeout must be a positive integer"
                 )
             }
             Self::InvalidTransactionIsolationLevel(value) => {

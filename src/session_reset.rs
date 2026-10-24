@@ -1,5 +1,4 @@
 use crate::error::NativeError;
-use deadpool_postgres::RecyclingMethod;
 
 #[derive(Clone, Copy)]
 pub(crate) enum SessionReset {
@@ -19,14 +18,18 @@ impl SessionReset {
         }
     }
 
-    pub(crate) fn recycling_method(self) -> RecyclingMethod {
+    pub(crate) fn cleanup_query(self) -> Option<&'static str> {
         match self {
-            Self::Fast => RecyclingMethod::Fast,
-            Self::Clean => RecyclingMethod::Clean,
+            Self::Fast => None,
+            Self::Clean => Some(
+                "CLOSE ALL; \
+                 SET SESSION AUTHORIZATION DEFAULT; \
+                 RESET ALL; \
+                 UNLISTEN *; \
+                 SELECT pg_advisory_unlock_all(); \
+                 DISCARD TEMP; \
+                 DISCARD SEQUENCES;",
+            ),
         }
-    }
-
-    pub(crate) fn restores_session(self) -> bool {
-        matches!(self, Self::Clean)
     }
 }
