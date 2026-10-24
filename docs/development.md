@@ -110,8 +110,8 @@ Run the pool recycling benchmark with:
 just benchmark-session-reset
 ```
 
-It compares fast return with the backend's clean return behavior. Clean mode
-runs the session cleanup query before returning each connection to the pool.
+It models fast return and the backend's clean return behavior. Clean mode runs
+the same session cleanup query before returning each connection to the pool.
 The output includes throughput and p50 and p95 operation latency.
 
 The optional arguments are operations per method per round, concurrency (and

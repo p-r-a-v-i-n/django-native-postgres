@@ -95,8 +95,9 @@ and custom connection options.
 The default fast pool mode does not reset arbitrary session changes before a
 connection is reused. Session state that belongs to one operation should use
 `SET LOCAL` inside a transaction instead of a persistent `SET` command. An
-opt-in clean mode is available for applications that cannot exclude persistent
-session changes.
+opt-in clean mode resets the settings and resources documented in
+[Configuration](configuration.md). It intentionally preserves prepared
+statements and cached plans.
 
 ### Test breadth
 

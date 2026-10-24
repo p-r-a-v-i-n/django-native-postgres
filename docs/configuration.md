@@ -95,6 +95,12 @@ state transaction-local. Code using persistent `SET`, `SET ROLE`, temporary
 tables, `LISTEN`, or session advisory locks must either undo that state itself
 or use `clean`.
 
+Clean mode intentionally keeps server-side prepared statements and cached
+plans so the native statement cache remains effective. Application SQL that
+creates named prepared statements must deallocate them explicitly. Clean mode
+should therefore be understood as resetting the session settings and resources
+listed above, not every possible kind of PostgreSQL session state.
+
 This option does not control failed-query and cancellation safety. Connections
 whose protocol state is uncertain are always discarded, and native
 transactions are always completed or rolled back before reuse.
@@ -183,8 +189,8 @@ With the default `fast` mode, applications must not let standalone queries
 leave behind `SET ROLE`, `search_path`, temporary tables, listeners, session
 advisory locks, or other session-local state. Transaction-specific settings
 should use `SET LOCAL` inside `transaction.atomic()` so PostgreSQL removes them
-when the transaction ends. Use `clean` when arbitrary session changes cannot
-be excluded.
+when the transaction ends. Use `clean` when the persistent settings and
+resources covered by its cleanup policy cannot otherwise be excluded.
 
 ## Standard Django settings not yet applied to native connections
 
