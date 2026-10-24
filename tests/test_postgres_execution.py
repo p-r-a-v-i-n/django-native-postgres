@@ -2821,6 +2821,56 @@ async def test_clean_session_reset_releases_session_resources(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("session_reset", ["fast", "clean"])
+async def test_raw_transaction_start_discards_pool_connection(
+    postgres_database_url,
+    session_reset,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        session_reset=session_reset,
+    )
+
+    try:
+        backend_pid = await _get_backend_pid(pool)
+
+        assert await _native.execute(pool=pool, sql="BEGIN") == []
+
+        assert await _get_backend_pid(pool) != backend_pid
+    finally:
+        await _native.close_pool(pool)
+
+
+@pytest.mark.asyncio
+async def test_streamed_transaction_start_discards_pool_connection(
+    postgres_database_url,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        session_reset="clean",
+    )
+
+    try:
+        backend_pid = await _get_backend_pid(pool)
+        stream, rows_affected, columns = await _native.open_query_stream(
+            pool=pool,
+            sql="""
+                /* outer /* nested */ comment */
+                START TRANSACTION
+            """,
+        )
+
+        assert rows_affected == 0
+        assert columns == []
+        assert await _native.fetch_query_stream(stream, 1) == []
+        assert await _get_backend_pid(pool) != backend_pid
+    finally:
+        await _native.close_pool(pool)
+
+
+@pytest.mark.asyncio
 async def test_clean_session_reset_releases_advisory_lock_on_return(
     postgres_database_url,
 ):

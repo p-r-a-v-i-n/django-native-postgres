@@ -268,7 +268,14 @@ pub(crate) async fn open(
     };
 
     if columns.is_empty() {
-        return finish_non_row_query(client, rows, pool, cancellation).await;
+        return finish_non_row_query(
+            client,
+            rows,
+            pool,
+            cancellation,
+            postgres::starts_transaction_block(&sql),
+        )
+        .await;
     }
 
     let (sender, receiver) = mpsc::channel(1);
@@ -286,6 +293,7 @@ async fn finish_non_row_query(
     rows: RowStream,
     pool: &PostgresPool,
     mut cancellation: oneshot::Receiver<()>,
+    starts_transaction_block: bool,
 ) -> Result<QueryStreamOpenResult, NativeError> {
     let mut rows = Box::pin(rows);
 
@@ -312,7 +320,7 @@ async fn finish_non_row_query(
                 handle.mark_exhausted();
 
                 drop(rows);
-                pool.release(client, true).await;
+                pool.release(client, !starts_transaction_block).await;
 
                 return Ok(QueryStreamOpenResult {
                     handle,

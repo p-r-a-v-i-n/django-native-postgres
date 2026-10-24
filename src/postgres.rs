@@ -121,6 +121,73 @@ pub(crate) fn query_error_confirms_cancellation(error: &tokio_postgres::Error) -
     error.code() == Some(&SqlState::QUERY_CANCELED)
 }
 
+pub(crate) fn starts_transaction_block(sql: &str) -> bool {
+    let Some((first_keyword, remainder)) = next_sql_keyword(sql) else {
+        return false;
+    };
+
+    if first_keyword.eq_ignore_ascii_case("BEGIN") {
+        return true;
+    }
+
+    first_keyword.eq_ignore_ascii_case("START")
+        && next_sql_keyword(remainder)
+            .is_some_and(|(keyword, _)| keyword.eq_ignore_ascii_case("TRANSACTION"))
+}
+
+fn next_sql_keyword(mut sql: &str) -> Option<(&str, &str)> {
+    loop {
+        sql = sql.trim_start();
+
+        if let Some(comment) = sql.strip_prefix("--") {
+            sql = comment
+                .find('\n')
+                .map_or("", |newline| &comment[newline + 1..]);
+            continue;
+        }
+
+        if sql.starts_with("/*") {
+            sql = strip_block_comment(sql)?;
+            continue;
+        }
+
+        let keyword_length = sql
+            .bytes()
+            .take_while(|byte| byte.is_ascii_alphabetic())
+            .count();
+        if keyword_length == 0 {
+            return None;
+        }
+
+        return Some((&sql[..keyword_length], &sql[keyword_length..]));
+    }
+}
+
+fn strip_block_comment(sql: &str) -> Option<&str> {
+    let bytes = sql.as_bytes();
+    let mut index = 2;
+    let mut depth = 1;
+
+    while index + 1 < bytes.len() {
+        match (bytes[index], bytes[index + 1]) {
+            (b'/', b'*') => {
+                depth += 1;
+                index += 2;
+            }
+            (b'*', b'/') => {
+                depth -= 1;
+                index += 2;
+                if depth == 0 {
+                    return Some(&sql[index..]);
+                }
+            }
+            _ => index += 1,
+        }
+    }
+
+    None
+}
+
 pub(crate) fn create_pool(handle: &PoolHandle) -> Result<PostgresPool, NativeError> {
     let database_url = &handle.database_url;
     let ssl_mode = handle.ssl_mode;
@@ -372,7 +439,8 @@ pub(crate) async fn execute(
     )
     .await;
 
-    let connection_can_be_reused = !client.is_closed()
+    let connection_can_be_reused = !(result.is_ok() && starts_transaction_block(sql))
+        && !client.is_closed()
         && match &result {
             Err(NativeError::PostgresCancel(_)) => false,
             Err(NativeError::PostgresQuery(error)) => query_error_allows_connection_reuse(error),
@@ -389,7 +457,25 @@ pub(crate) async fn execute(
 
 #[cfg(test)]
 mod tests {
-    use super::{append_startup_time_zone, escape_startup_option_value};
+    use super::{append_startup_time_zone, escape_startup_option_value, starts_transaction_block};
+
+    #[test]
+    fn recognizes_transaction_block_start() {
+        assert!(starts_transaction_block("BEGIN"));
+        assert!(starts_transaction_block(" begin work"));
+        assert!(starts_transaction_block("START TRANSACTION"));
+        assert!(starts_transaction_block(
+            "-- leading comment\n/* outer /* nested */ comment */ START TRANSACTION"
+        ));
+    }
+
+    #[test]
+    fn ignores_non_transaction_statements() {
+        assert!(!starts_transaction_block("SELECT 'BEGIN'"));
+        assert!(!starts_transaction_block("START_REPLICATION"));
+        assert!(!starts_transaction_block("/* BEGIN */ SELECT 1"));
+        assert!(!starts_transaction_block("/* unterminated"));
+    }
 
     #[test]
     fn startup_option_value_preserves_plain_time_zone() {
