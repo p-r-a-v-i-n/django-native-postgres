@@ -997,6 +997,42 @@ async def test_executor_maps_deferred_constraint_errors_on_commit(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("session_reset", ["fast", "clean"])
+async def test_failed_commit_returns_connection_to_pool(
+    postgres_database_url,
+    session_reset,
+):
+    executor = NativeExecutor(
+        database_url=postgres_database_url,
+        pool_max_size=1,
+        session_reset=session_reset,
+    )
+
+    try:
+        with pytest.raises(IntegrityError):
+            async with executor.transaction():
+                await executor.execute(
+                    sql=(
+                        "CREATE TEMP TABLE deferred_reuse ("
+                        "value BIGINT, "
+                        "CONSTRAINT deferred_reuse_value UNIQUE (value) "
+                        "DEFERRABLE INITIALLY DEFERRED) ON COMMIT DROP"
+                    )
+                )
+                before = await executor.execute(sql="SELECT pg_backend_pid()")
+                await executor.execute(
+                    sql="INSERT INTO deferred_reuse VALUES (%s), (%s)",
+                    params=(1, 1),
+                )
+
+        after = await executor.execute(sql="SELECT pg_backend_pid()")
+    finally:
+        await executor.close()
+
+    assert after == before
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("sqlstate", ["40001", "40P01"])
 async def test_executor_maps_retryable_transaction_errors(
     postgres_database_url,

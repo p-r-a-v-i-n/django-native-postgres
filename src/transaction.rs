@@ -429,7 +429,7 @@ async fn run_transaction_on_client(
                             operation: "commit",
                             source,
                         });
-                let connection_can_be_reused = result.is_ok();
+                let connection_can_be_reused = transaction_end_allows_reuse(&result);
                 return (connection_can_be_reused, Some((response, result)));
             }
             TransactionCommand::Rollback { response } => {
@@ -439,7 +439,7 @@ async fn run_transaction_on_client(
                         source,
                     }
                 });
-                let connection_can_be_reused = result.is_ok();
+                let connection_can_be_reused = transaction_end_allows_reuse(&result);
                 return (connection_can_be_reused, Some((response, result)));
             }
         }
@@ -703,6 +703,19 @@ fn transaction_error_allows_reuse(error: &NativeError) -> bool {
             connection_can_be_reused,
         } => *connection_can_be_reused,
         _ => true,
+    }
+}
+
+// A COMMIT or ROLLBACK rejected with an ERROR (for example a deferred
+// constraint or serialization failure) still ends the transaction, so the
+// connection is idle and can be reused.
+fn transaction_end_allows_reuse(result: &Result<(), NativeError>) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(NativeError::PostgresTransaction { source, .. }) => {
+            postgres::query_error_allows_connection_reuse(source)
+        }
+        Err(_) => false,
     }
 }
 
