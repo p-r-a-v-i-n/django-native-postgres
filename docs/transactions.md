@@ -4,6 +4,12 @@ The native transaction path pins one pooled PostgreSQL connection until commit
 or rollback. Python stores transaction routing state in a `ContextVar`, while
 Rust owns the physical connection.
 
+Send transaction boundaries through `transaction.atomic()` or the native
+transaction API. Raw `BEGIN` and `START TRANSACTION` statements cannot pin a
+pooled connection across separate ORM operations. If one is executed through
+the standalone query path, the backend discards that connection after the
+statement so an open transaction cannot leak back into the pool.
+
 ## Async atomic blocks
 
 The Django fork supports `transaction.atomic()` as an async context manager:

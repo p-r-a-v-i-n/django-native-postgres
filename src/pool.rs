@@ -1,10 +1,22 @@
 use crate::error::NativeError;
+use crate::session_reset::SessionReset;
 use crate::tls::SslMode;
 use pyo3::prelude::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 static NEXT_POOL_ID: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) struct PoolHandleConfig {
+    pub(crate) database_url: String,
+    pub(crate) max_size: usize,
+    pub(crate) wait_timeout_ms: i64,
+    pub(crate) reset_timeout_ms: i64,
+    pub(crate) ssl_mode: String,
+    pub(crate) ssl_root_cert: Option<String>,
+    pub(crate) time_zone: Option<String>,
+    pub(crate) session_reset: String,
+}
 
 #[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
@@ -13,21 +25,26 @@ pub(crate) struct PoolHandle {
     pub(crate) database_url: String,
     pub(crate) max_size: usize,
     pub(crate) wait_timeout_ms: u64,
+    pub(crate) reset_timeout_ms: u64,
     pub(crate) ssl_mode: SslMode,
     pub(crate) ssl_root_cert: Option<String>,
     pub(crate) time_zone: Option<String>,
+    pub(crate) session_reset: SessionReset,
     closed: Arc<AtomicBool>,
 }
 
 impl PoolHandle {
-    pub(crate) fn new(
-        database_url: String,
-        max_size: usize,
-        wait_timeout_ms: i64,
-        ssl_mode: String,
-        ssl_root_cert: Option<String>,
-        time_zone: Option<String>,
-    ) -> Result<Self, NativeError> {
+    pub(crate) fn new(config: PoolHandleConfig) -> Result<Self, NativeError> {
+        let PoolHandleConfig {
+            database_url,
+            max_size,
+            wait_timeout_ms,
+            reset_timeout_ms,
+            ssl_mode,
+            ssl_root_cert,
+            time_zone,
+            session_reset,
+        } = config;
         if max_size == 0 {
             return Err(NativeError::InvalidPoolMaxSize);
         }
@@ -36,16 +53,23 @@ impl PoolHandle {
             .ok()
             .filter(|wait_timeout_ms| *wait_timeout_ms > 0)
             .ok_or(NativeError::InvalidPoolWaitTimeout)?;
+        let reset_timeout_ms = u64::try_from(reset_timeout_ms)
+            .ok()
+            .filter(|reset_timeout_ms| *reset_timeout_ms > 0)
+            .ok_or(NativeError::InvalidPoolResetTimeout)?;
 
         let ssl_mode = SslMode::parse(ssl_mode)?;
+        let session_reset = SessionReset::parse(session_reset)?;
         Ok(Self {
             id: NEXT_POOL_ID.fetch_add(1, Ordering::Relaxed),
             database_url,
             max_size,
             wait_timeout_ms,
+            reset_timeout_ms,
             ssl_mode,
             ssl_root_cert,
             time_zone,
+            session_reset,
             closed: Arc::new(AtomicBool::new(false)),
         })
     }

@@ -95,3 +95,6 @@ test-postgres *args: db-up
 
 test-postgres-tls:
     tests/run_postgres_tls.sh
+
+benchmark-session-reset operations="3000" concurrency="1" rounds="3": db-up
+    @DNP_SESSION_RESET_BENCHMARK_DATABASE_URL="$DNP_TEST_DATABASE_URL" cargo run --release --example session_reset -- {{ operations }} {{ concurrency }} {{ rounds }}

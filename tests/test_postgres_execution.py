@@ -997,6 +997,42 @@ async def test_executor_maps_deferred_constraint_errors_on_commit(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("session_reset", ["fast", "clean"])
+async def test_failed_commit_returns_connection_to_pool(
+    postgres_database_url,
+    session_reset,
+):
+    executor = NativeExecutor(
+        database_url=postgres_database_url,
+        pool_max_size=1,
+        session_reset=session_reset,
+    )
+
+    try:
+        with pytest.raises(IntegrityError):
+            async with executor.transaction():
+                await executor.execute(
+                    sql=(
+                        "CREATE TEMP TABLE deferred_reuse ("
+                        "value BIGINT, "
+                        "CONSTRAINT deferred_reuse_value UNIQUE (value) "
+                        "DEFERRABLE INITIALLY DEFERRED) ON COMMIT DROP"
+                    )
+                )
+                before = await executor.execute(sql="SELECT pg_backend_pid()")
+                await executor.execute(
+                    sql="INSERT INTO deferred_reuse VALUES (%s), (%s)",
+                    params=(1, 1),
+                )
+
+        after = await executor.execute(sql="SELECT pg_backend_pid()")
+    finally:
+        await executor.close()
+
+    assert after == before
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("sqlstate", ["40001", "40P01"])
 async def test_executor_maps_retryable_transaction_errors(
     postgres_database_url,
@@ -1126,6 +1162,21 @@ def test_create_pool_rejects_invalid_wait_timeout(
         _native.create_pool(
             database_url=postgres_database_url,
             wait_timeout_ms=wait_timeout_ms,
+        )
+
+
+@pytest.mark.parametrize("reset_timeout_ms", [0, -1])
+def test_create_pool_rejects_invalid_reset_timeout(
+    postgres_database_url,
+    reset_timeout_ms,
+):
+    with pytest.raises(
+        RuntimeError,
+        match="PostgreSQL session reset timeout must be a positive integer",
+    ):
+        _native.create_pool(
+            database_url=postgres_database_url,
+            reset_timeout_ms=reset_timeout_ms,
         )
 
 
@@ -2515,6 +2566,28 @@ def test_create_pool_rejects_invalid_ssl_mode(postgres_database_url):
         )
 
 
+def test_create_pool_rejects_invalid_session_reset(postgres_database_url):
+    with pytest.raises(
+        ValueError,
+        match="unsupported PostgreSQL session reset mode: invalid",
+    ):
+        _native.create_pool(
+            database_url=postgres_database_url,
+            session_reset="invalid",
+        )
+
+
+@pytest.mark.parametrize("session_reset", ["fast", "clean"])
+def test_create_pool_accepts_supported_session_reset_modes(
+    postgres_database_url,
+    session_reset,
+):
+    _native.create_pool(
+        database_url=postgres_database_url,
+        session_reset=session_reset,
+    )
+
+
 @pytest.mark.parametrize("ssl_mode", ["disable", "prefer", "require"])
 def test_create_pool_accepts_supported_ssl_modes(
     postgres_database_url,
@@ -2694,5 +2767,338 @@ async def test_pool_rejects_invalid_connection_time_zone(
             match="failed to initialize PostgreSQL time zone",
         ):
             await _native.execute(pool=pool, sql="SELECT 1::BIGINT")
+    finally:
+        await _native.close_pool(pool)
+
+
+@pytest.mark.asyncio
+async def test_fast_session_reset_preserves_session_changes(
+    postgres_database_url,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        session_reset="fast",
+    )
+
+    try:
+        await _native.execute(
+            pool=pool,
+            sql="SELECT set_config('application_name', 'changed', false)",
+        )
+
+        assert await _native.execute(
+            pool=pool,
+            sql="SELECT current_setting('application_name')",
+        ) == [["changed"]]
+    finally:
+        await _native.close_pool(pool)
+
+
+@pytest.mark.asyncio
+async def test_clean_session_reset_removes_session_changes(
+    postgres_database_url,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        session_reset="clean",
+    )
+
+    try:
+        initial_value = await _native.execute(
+            pool=pool,
+            sql="SELECT current_setting('application_name')",
+        )
+        await _native.execute(
+            pool=pool,
+            sql="SELECT set_config('application_name', 'changed', false)",
+        )
+
+        assert (
+            await _native.execute(
+                pool=pool,
+                sql="SELECT current_setting('application_name')",
+            )
+            == initial_value
+        )
+    finally:
+        await _native.close_pool(pool)
+
+
+@pytest.mark.asyncio
+async def test_clean_session_reset_releases_session_resources(
+    postgres_database_url,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        session_reset="clean",
+    )
+
+    try:
+        await _native.execute(
+            pool=pool,
+            sql="CREATE TEMP TABLE native_session_reset (value BIGINT)",
+        )
+        assert await _native.execute(
+            pool=pool,
+            sql="SELECT to_regclass('pg_temp.native_session_reset')::TEXT",
+        ) == [[None]]
+
+        await _native.execute(pool=pool, sql="LISTEN native_session_reset")
+        assert await _native.execute(
+            pool=pool,
+            sql="SELECT count(*)::BIGINT FROM pg_listening_channels()",
+        ) == [[0]]
+
+    finally:
+        await _native.close_pool(pool)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("session_reset", ["fast", "clean"])
+async def test_raw_transaction_start_discards_pool_connection(
+    postgres_database_url,
+    session_reset,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        session_reset=session_reset,
+    )
+
+    try:
+        backend_pid = await _get_backend_pid(pool)
+
+        assert await _native.execute(pool=pool, sql="BEGIN") == []
+
+        assert await _get_backend_pid(pool) != backend_pid
+    finally:
+        await _native.close_pool(pool)
+
+
+@pytest.mark.asyncio
+async def test_streamed_transaction_start_discards_pool_connection(
+    postgres_database_url,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        session_reset="clean",
+    )
+
+    try:
+        backend_pid = await _get_backend_pid(pool)
+        stream, rows_affected, columns = await _native.open_query_stream(
+            pool=pool,
+            sql="""
+                /* outer /* nested */ comment */
+                START TRANSACTION
+            """,
+        )
+
+        assert rows_affected == 0
+        assert columns == []
+        assert await _native.fetch_query_stream(stream, 1) == []
+        assert await _get_backend_pid(pool) != backend_pid
+    finally:
+        await _native.close_pool(pool)
+
+
+@pytest.mark.asyncio
+async def test_clean_session_reset_releases_advisory_lock_on_return(
+    postgres_database_url,
+):
+    target_pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        session_reset="clean",
+    )
+    observer_pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+    )
+
+    try:
+        rows = await _native.execute(
+            pool=target_pool,
+            sql="""
+                SELECT pg_backend_pid()::BIGINT
+                FROM pg_advisory_lock(pg_backend_pid()::BIGINT)
+            """,
+        )
+        lock_key = rows[0][0]
+
+        assert await observer_can_acquire_advisory_lock(observer_pool, lock_key)
+        assert await _get_backend_pid(target_pool) == lock_key
+    finally:
+        await _native.close_pool(target_pool)
+        await _native.close_pool(observer_pool)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("completion", ["commit", "rollback"])
+async def test_clean_session_reset_releases_transaction_advisory_lock(
+    postgres_database_url,
+    completion,
+):
+    target_pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        session_reset="clean",
+    )
+    observer_pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+    )
+    transaction = None
+
+    try:
+        transaction = await _native.begin_transaction(target_pool)
+        rows = await _native.execute_transaction(
+            transaction=transaction,
+            sql="""
+                SELECT pg_backend_pid()::BIGINT
+                FROM pg_advisory_lock(pg_backend_pid()::BIGINT)
+            """,
+        )
+        lock_key = rows[0][0]
+
+        if completion == "commit":
+            await _native.commit_transaction(transaction)
+        else:
+            await _native.rollback_transaction(transaction)
+        transaction = None
+
+        assert await observer_can_acquire_advisory_lock(observer_pool, lock_key)
+        assert await _get_backend_pid(target_pool) == lock_key
+    finally:
+        if transaction is not None:
+            await _native.rollback_transaction(transaction)
+        await _native.close_pool(target_pool)
+        await _native.close_pool(observer_pool)
+
+
+@pytest.mark.asyncio
+async def test_clean_session_reset_releases_stream_advisory_lock(
+    postgres_database_url,
+):
+    target_pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        session_reset="clean",
+    )
+    observer_pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+    )
+
+    try:
+        stream, _, _ = await _native.open_query_stream(
+            pool=target_pool,
+            sql="""
+                SELECT pg_backend_pid()::BIGINT
+                FROM pg_advisory_lock(pg_backend_pid()::BIGINT)
+            """,
+        )
+        rows = await _native.fetch_query_stream(stream, 2)
+        lock_key = rows[0][0]
+
+        assert await observer_can_acquire_advisory_lock(observer_pool, lock_key)
+        assert await _get_backend_pid(target_pool) == lock_key
+    finally:
+        await _native.close_pool(target_pool)
+        await _native.close_pool(observer_pool)
+
+
+@pytest.mark.asyncio
+async def test_clean_session_reset_releases_closed_stream_advisory_lock(
+    postgres_database_url,
+):
+    target_pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        session_reset="clean",
+    )
+    observer_pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+    )
+
+    try:
+        stream, _, _ = await _native.open_query_stream(
+            pool=target_pool,
+            sql="""
+                SELECT pg_backend_pid()::BIGINT
+                FROM pg_advisory_lock(pg_backend_pid()::BIGINT)
+
+                UNION ALL
+
+                SELECT pg_backend_pid()::BIGINT
+                FROM generate_series(1, 10000)
+
+                UNION ALL
+
+                SELECT pg_backend_pid()::BIGINT
+                FROM pg_sleep(5)
+            """,
+        )
+        rows = await _native.fetch_query_stream(stream, 1)
+        lock_key = rows[0][0]
+
+        await _native.close_query_stream(stream)
+
+        assert await observer_can_acquire_advisory_lock(observer_pool, lock_key)
+        assert await _get_backend_pid(target_pool) == lock_key
+    finally:
+        await _native.close_pool(target_pool)
+        await _native.close_pool(observer_pool)
+
+
+async def observer_can_acquire_advisory_lock(pool, lock_key):
+    result = await _native.execute(
+        pool=pool,
+        sql="""
+            SELECT CASE
+                WHEN pg_try_advisory_lock(%s) THEN 1::BIGINT
+                ELSE 0::BIGINT
+            END
+        """,
+        params=(lock_key,),
+    )
+    acquired = result == [[1]]
+
+    if acquired:
+        await _native.execute(
+            pool=pool,
+            sql="SELECT 1::BIGINT FROM pg_advisory_unlock(%s)",
+            params=(lock_key,),
+        )
+
+    return acquired
+
+
+@pytest.mark.asyncio
+async def test_clean_session_reset_restores_connection_time_zone(
+    postgres_database_url,
+):
+    pool = _native.create_pool(
+        database_url=postgres_database_url,
+        max_size=1,
+        time_zone="Asia/Kolkata",
+        session_reset="clean",
+    )
+
+    try:
+        await _native.execute(
+            pool=pool,
+            sql="SELECT set_config('TimeZone', 'UTC', false)",
+        )
+
+        assert await _native.execute(
+            pool=pool,
+            sql="SELECT current_setting('TimeZone')",
+        ) == [["Asia/Kolkata"]]
     finally:
         await _native.close_pool(pool)

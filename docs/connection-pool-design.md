@@ -36,13 +36,15 @@ a connection.
 
 ## Configuration
 
-Pool configuration is read from `OPTIONS["native_pool"]`. See
-[Configuration](configuration.md) for the complete `DATABASES` example and
-validation rules.
+Optional pool configuration is read from `OPTIONS["native_pool"]`. Omitting
+the mapping uses the defaults. See [Configuration](configuration.md) for
+examples and validation rules.
 
 `max_size` is the maximum number of physical connections owned by this handle.
 `wait_timeout_ms` limits how long an operation waits to borrow a connection
-when the pool is exhausted. Both must be positive integers.
+when the pool is exhausted. Both must be positive integers. `session_reset`
+selects fast reuse or opt-in cleanup of PostgreSQL session state.
+`reset_timeout_ms` bounds that cleanup query.
 
 `max_size` is not a whole-application limit. Separate database wrappers,
 aliases, and worker processes own separate pools. The possible total is the
@@ -50,6 +52,19 @@ sum of every pool's maximum across every running process; for equally sized
 pools, this is roughly `max_size * handles per process * worker processes`.
 
 The pool wait timeout does not limit PostgreSQL statement execution time.
+
+Fast reuse returns a healthy connection directly to the pool. Clean reuse runs
+one cleanup round trip before returning it, so dirty session state never waits
+idle in the pool. Cleanup happens once per autocommit operation, completed
+query stream, or completed transaction, rather than once per query inside a
+transaction or stream. It also restores Django's configured time zone.
+
+Cleanup has its own timeout. A failed or timed-out cleanup discards the
+connection. It does not replace a successful query or commit result with an
+error, because retrying already-completed database work could duplicate a
+write. Query failures and cancellations use the same safety rules in both
+modes: a connection is reused only when its protocol state is known to be
+safe.
 
 ## Autocommit query lifecycle
 
@@ -64,6 +79,9 @@ wait for one connection
       |
       v
 execute and decode query
+      |
+      v
+optionally clean session
       |
       v
 return healthy connection to pool
@@ -129,6 +147,9 @@ borrow and pin connection
       |
       v
 commit or rollback
+      |
+      v
+optionally clean session
       |
       v
 return connection to pool
@@ -228,7 +249,7 @@ Work still in progress includes:
 
 - client certificates and additional TLS options;
 - complete PostgreSQL connection options;
-- broader session initialization and reset rules;
+- session settings beyond the database time zone;
 - idle connection and maximum-lifetime policies;
 - integration with Django wrapper and process shutdown;
 - metrics and tracing hooks; and

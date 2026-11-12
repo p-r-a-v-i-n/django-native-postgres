@@ -102,6 +102,29 @@ Direct pytest runs skip PostgreSQL tests when that URL is not configured. When
 it is configured, the caller is responsible for making sure the referenced
 database is available and safe to use for tests.
 
+## Benchmark session reset overhead
+
+Run the pool recycling benchmark with:
+
+```console
+just benchmark-session-reset
+```
+
+It models fast return and the backend's clean return behavior. Clean mode runs
+the same session cleanup query before returning each connection to the pool.
+The output includes throughput and p50 and p95 operation latency.
+
+The optional arguments are operations per method per round, concurrency (and
+pool size), and number of rounds:
+
+```console
+just benchmark-session-reset 10000 16 5
+```
+
+This is a local database benchmark intended for comparing the two recycling
+methods on the same machine. Its numbers are not production performance
+guarantees.
+
 ## Before committing
 
 Run these commands after changing Python and Rust code:

@@ -262,17 +262,24 @@ pub(crate) async fn open(
                     } => *connection_can_be_reused,
                     _ => true,
                 };
-            discard_if_needed(client, connection_can_be_reused);
+            pool.release(client, connection_can_be_reused).await;
             return Err(error);
         }
     };
 
     if columns.is_empty() {
-        return finish_non_row_query(client, rows, pool.tls(), cancellation).await;
+        return finish_non_row_query(
+            client,
+            rows,
+            pool,
+            cancellation,
+            postgres::starts_transaction_block(&sql),
+        )
+        .await;
     }
 
     let (sender, receiver) = mpsc::channel(1);
-    tokio::spawn(run_query_stream(client, rows, pool.tls().clone(), receiver));
+    tokio::spawn(run_query_stream(client, rows, pool.clone(), receiver));
 
     Ok(QueryStreamOpenResult {
         handle: QueryStreamHandle::new(sender),
@@ -284,8 +291,9 @@ pub(crate) async fn open(
 async fn finish_non_row_query(
     client: Object,
     rows: RowStream,
-    tls: &TlsConnector,
+    pool: &PostgresPool,
     mut cancellation: oneshot::Receiver<()>,
+    starts_transaction_block: bool,
 ) -> Result<QueryStreamOpenResult, NativeError> {
     let mut rows = Box::pin(rows);
 
@@ -311,6 +319,9 @@ async fn finish_non_row_query(
                 let handle = QueryStreamHandle::new(sender);
                 handle.mark_exhausted();
 
+                drop(rows);
+                pool.release(client, !starts_transaction_block).await;
+
                 return Ok(QueryStreamOpenResult {
                     handle,
                     rows_affected: Some(rows_affected),
@@ -320,11 +331,12 @@ async fn finish_non_row_query(
             NextRowOutcome::Row(Err(error)) => {
                 let connection_can_be_reused =
                     postgres::query_error_allows_connection_reuse(&error);
-                discard_if_needed(client, connection_can_be_reused);
+                drop(rows);
+                pool.release(client, connection_can_be_reused).await;
                 return Err(NativeError::PostgresQuery(error));
             }
             NextRowOutcome::Cancelled => {
-                let cleanup = cancel_and_drain(&client, tls, rows.as_mut()).await;
+                let cleanup = cancel_and_drain(&client, pool.tls(), rows.as_mut()).await;
                 let connection_can_be_reused = cleanup.as_ref().is_ok_and(|reusable| *reusable);
                 let error = match cleanup {
                     Ok(_) => NativeError::QueryCancelled {
@@ -332,7 +344,8 @@ async fn finish_non_row_query(
                     },
                     Err(error) => error,
                 };
-                discard_if_needed(client, connection_can_be_reused);
+                drop(rows);
+                pool.release(client, connection_can_be_reused).await;
                 return Err(error);
             }
         }
@@ -418,16 +431,19 @@ pub(crate) async fn close(handle: QueryStreamHandle) -> Result<(), NativeError> 
 async fn run_query_stream(
     client: Object,
     rows: RowStream,
-    tls: TlsConnector,
+    pool: PostgresPool,
     mut receiver: mpsc::Receiver<QueryStreamCommand>,
 ) {
     let mut rows = Box::pin(rows);
     let mut pending_row = None;
-    let connection_can_be_reused = loop {
+    loop {
         let Some(command) = receiver.recv().await else {
-            break cancel_and_drain(&client, &tls, rows.as_mut())
+            let connection_can_be_reused = cancel_and_drain(&client, pool.tls(), rows.as_mut())
                 .await
                 .is_ok_and(|reusable| reusable);
+            drop(rows);
+            pool.release(client, connection_can_be_reused).await;
+            return;
         };
 
         match command {
@@ -458,7 +474,8 @@ async fn run_query_stream(
                     let row = match next_row {
                         NextRowOutcome::Row(row) => row,
                         NextRowOutcome::Cancelled => {
-                            let cleanup = cancel_and_drain(&client, &tls, rows.as_mut()).await;
+                            let cleanup =
+                                cancel_and_drain(&client, pool.tls(), rows.as_mut()).await;
                             let connection_can_be_reused =
                                 cleanup.as_ref().is_ok_and(|reusable| *reusable);
                             let error = match cleanup {
@@ -467,8 +484,10 @@ async fn run_query_stream(
                                 },
                                 Err(error) => error,
                             };
+                            drop(rows);
+                            pool.release(client, connection_can_be_reused).await;
                             let _ = response.send(Err(error));
-                            return discard_if_needed(client, connection_can_be_reused);
+                            return;
                         }
                     };
 
@@ -487,18 +506,24 @@ async fn run_query_stream(
                         Err(error) => {
                             let connection_can_be_reused =
                                 postgres::query_error_allows_connection_reuse(&error);
-                            let _ = response.send(Err(NativeError::PostgresQuery(error)));
-                            return discard_if_needed(client, connection_can_be_reused);
+                            let error = NativeError::PostgresQuery(error);
+                            drop(rows);
+                            pool.release(client, connection_can_be_reused).await;
+                            let _ = response.send(Err(error));
+                            return;
                         }
                     }
                 }
 
                 if let Some(error) = fetch_error {
-                    let connection_can_be_reused = cancel_and_drain(&client, &tls, rows.as_mut())
-                        .await
-                        .is_ok_and(|reusable| reusable);
+                    let connection_can_be_reused =
+                        cancel_and_drain(&client, pool.tls(), rows.as_mut())
+                            .await
+                            .is_ok_and(|reusable| reusable);
+                    drop(rows);
+                    pool.release(client, connection_can_be_reused).await;
                     let _ = response.send(Err(error));
-                    break connection_can_be_reused;
+                    return;
                 }
 
                 if !exhausted && decoded_rows.len() == size {
@@ -513,40 +538,53 @@ async fn run_query_stream(
                         Some(Err(error)) => {
                             let connection_can_be_reused =
                                 postgres::query_error_allows_connection_reuse(&error);
-                            let _ = response.send(Err(NativeError::PostgresQuery(error)));
-                            return discard_if_needed(client, connection_can_be_reused);
+                            let error = NativeError::PostgresQuery(error);
+                            drop(rows);
+                            pool.release(client, connection_can_be_reused).await;
+                            let _ = response.send(Err(error));
+                            return;
                         }
                         None => {}
                     }
                 }
 
+                if exhausted {
+                    drop(rows);
+                    pool.release(client, true).await;
+                    let _ = response.send(Ok(QueryStreamFetchResult {
+                        rows: decoded_rows,
+                        exhausted: true,
+                    }));
+                    return;
+                }
+
                 if response
                     .send(Ok(QueryStreamFetchResult {
                         rows: decoded_rows,
-                        exhausted,
+                        exhausted: false,
                     }))
                     .is_err()
                 {
-                    break cancel_and_drain(&client, &tls, rows.as_mut())
-                        .await
-                        .is_ok_and(|reusable| reusable);
-                }
-
-                if exhausted {
-                    break true;
+                    let connection_can_be_reused =
+                        cancel_and_drain(&client, pool.tls(), rows.as_mut())
+                            .await
+                            .is_ok_and(|reusable| reusable);
+                    drop(rows);
+                    pool.release(client, connection_can_be_reused).await;
+                    return;
                 }
             }
             QueryStreamCommand::Close { response } => {
-                let cleanup = cancel_and_drain(&client, &tls, rows.as_mut()).await;
+                let cleanup = cancel_and_drain(&client, pool.tls(), rows.as_mut()).await;
                 let connection_can_be_reused = cleanup.as_ref().is_ok_and(|reusable| *reusable);
                 let result = cleanup.map(|_| ());
+                drop(rows);
+                pool.release(client, connection_can_be_reused).await;
                 let _ = response.send(result);
-                break connection_can_be_reused;
+                return;
             }
         }
-    };
-
-    discard_if_needed(client, connection_can_be_reused);
+    }
 }
 
 async fn cancel_and_drain(
@@ -569,11 +607,5 @@ async fn drain_cancelled_rows(mut rows: Pin<&mut RowStream>) -> bool {
             Ok(None) => return false,
             Err(error) => return postgres::query_error_confirms_cancellation(&error),
         }
-    }
-}
-
-fn discard_if_needed(client: Object, connection_can_be_reused: bool) {
-    if !connection_can_be_reused || client.is_closed() {
-        drop(Object::take(client));
     }
 }

@@ -30,6 +30,8 @@ class DatabaseWrapper(PostgreSQLDatabaseWrapper):
             ssl_root_cert = options.get("sslrootcert")
             pool_max_size = pool_options.get("max_size", 16)
             pool_wait_timeout_ms = pool_options.get("wait_timeout_ms", 30_000)
+            pool_session_reset = pool_options.get("session_reset", "fast")
+            pool_reset_timeout_ms = pool_options.get("reset_timeout_ms", 5_000)
             database_url = make_conninfo(
                 dbname=settings.get("NAME") or "postgres",
                 user=settings.get("USER") or None,
@@ -56,6 +58,20 @@ class DatabaseWrapper(PostgreSQLDatabaseWrapper):
                     "native_pool.wait_timeout_ms must be a positive integer"
                 )
 
+            if pool_session_reset not in ("fast", "clean"):
+                raise ImproperlyConfigured(
+                    "native_pool.session_reset must be 'fast' or 'clean'"
+                )
+
+            if (
+                isinstance(pool_reset_timeout_ms, bool)
+                or not isinstance(pool_reset_timeout_ms, int)
+                or pool_reset_timeout_ms <= 0
+            ):
+                raise ImproperlyConfigured(
+                    "native_pool.reset_timeout_ms must be a positive integer"
+                )
+
             executor = NativeExecutor(
                 database_url=database_url,
                 pool_max_size=pool_max_size,
@@ -63,6 +79,8 @@ class DatabaseWrapper(PostgreSQLDatabaseWrapper):
                 ssl_mode=ssl_mode,
                 ssl_root_cert=ssl_root_cert,
                 time_zone=self.timezone_name,
+                session_reset=pool_session_reset,
+                pool_reset_timeout_ms=pool_reset_timeout_ms,
             )
             self._native_executor = executor
         return executor

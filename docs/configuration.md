@@ -1,9 +1,9 @@
 # Configuration
 
-The backend uses Django's normal `DATABASES` setting and adds a small native
-pool configuration section.
+The backend uses Django's normal `DATABASES` setting. Native pool and TLS
+settings are optional.
 
-## Database engine
+## Basic configuration
 
 ```python
 DATABASES = {
@@ -14,22 +14,42 @@ DATABASES = {
         "PASSWORD": "secret",
         "HOST": "127.0.0.1",
         "PORT": "5432",
-        "OPTIONS": {
-            "sslmode": "require",
-            "sslrootcert": "/etc/ssl/postgres-ca.pem",
-            "native_pool": {
-                "max_size": 16,
-                "wait_timeout_ms": 30_000,
-            },
-        },
     },
 }
 ```
 
+No backend-specific `OPTIONS` are required. `NAME`, `USER`, `PASSWORD`,
+`HOST`, and `PORT` are normal Django PostgreSQL connection settings; configure
+them for the PostgreSQL server being used.
+
 The package must be importable and the application must use the compatible
 Django fork described in [Django fork requirement](django-fork.md).
 
+## Optional settings
+
+Add only the settings the application needs:
+
+```python
+DATABASES["default"]["OPTIONS"] = {
+    "sslmode": "require",
+    "sslrootcert": "/etc/ssl/postgres-ca.pem",
+    "native_pool": {
+        "max_size": 32,
+        "wait_timeout_ms": 10_000,
+        "session_reset": "clean",
+        "reset_timeout_ms": 2_000,
+    },
+}
+```
+
+This example changes every available option to demonstrate where it belongs.
+It is not a recommended configuration for every application. Defaults and
+tradeoffs are documented below.
+
 ## Native pool options
+
+The complete `native_pool` mapping is optional. When it is omitted, all pool
+options use their defaults.
 
 ### `max_size`
 
@@ -55,7 +75,53 @@ native pool.
 
 This is not a PostgreSQL statement timeout. It limits only pool acquisition.
 
+### `session_reset`
+
+Controls what happens before a healthy connection is returned to the pool.
+
+- `fast` returns the connection without running a cleanup query. This is the
+  default and has the lowest overhead.
+- `clean` closes cursors, restores session authorization and settings, removes
+  listeners and temporary objects, and releases session advisory locks before
+  the connection becomes idle. It adds one PostgreSQL round trip to each
+  physical connection lease.
+
+A lease is one autocommit operation, one complete query-stream lifetime, or
+one complete transaction. Queries and savepoints inside the same transaction
+do not each run the cleanup query.
+
+Use `fast` when the application uses normal ORM operations and keeps custom
+state transaction-local. Code using persistent `SET`, `SET ROLE`, temporary
+tables, `LISTEN`, or session advisory locks must either undo that state itself
+or use `clean`.
+
+Clean mode intentionally keeps server-side prepared statements and cached
+plans so the native statement cache remains effective. Application SQL that
+creates named prepared statements must deallocate them explicitly. Clean mode
+should therefore be understood as resetting the session settings and resources
+listed above, not every possible kind of PostgreSQL session state.
+
+This option does not control failed-query and cancellation safety. Connections
+whose protocol state is uncertain are always discarded, and native
+transactions are always completed or rolled back before reuse.
+
+### `reset_timeout_ms`
+
+Maximum time allowed for the cleanup query used by `session_reset="clean"`.
+
+- Default: `5_000`
+- Required type: positive integer
+
+If cleanup fails or exceeds this timeout, the connection is discarded instead
+of being returned to the pool. A query or transaction that already completed
+successfully remains successful; cleanup failure does not turn it into an
+error that an application might retry. This option has no effect in `fast`
+mode.
+
 ## TLS options
+
+Both TLS settings are optional. The default is `sslmode="prefer"` with the
+operating system's root certificates.
 
 ### `sslmode`
 
@@ -108,7 +174,8 @@ native support before they can be documented as compatible.
 
 Every newly created physical connection is initialized with
 `DatabaseWrapper.timezone_name`. Django resolves this from `USE_TZ`, the
-project `TIME_ZONE`, and the database `TIME_ZONE` setting.
+project `TIME_ZONE`, and the database `TIME_ZONE` setting. In `clean` mode the
+time zone is also a connection-start default, so session reset restores it.
 
 Initialization runs once when PostgreSQL opens the connection, not every time
 the pool lends that connection to a query. Reusing an initialized connection
@@ -118,12 +185,12 @@ The native executor captures the resolved time zone when it first creates its
 pool. Changing Django time-zone settings at runtime does not reconfigure an
 existing native pool.
 
-The pool does not currently reset arbitrary session changes before reuse.
-Applications must not rely on standalone queries preserving `SET ROLE`,
-`search_path`, temporary tables, listeners, session advisory locks, or other
-session-local state. Transaction-specific settings should use `SET LOCAL`
-inside `transaction.atomic()` so PostgreSQL removes them when the transaction
-ends.
+With the default `fast` mode, applications must not let standalone queries
+leave behind `SET ROLE`, `search_path`, temporary tables, listeners, session
+advisory locks, or other session-local state. Transaction-specific settings
+should use `SET LOCAL` inside `transaction.atomic()` so PostgreSQL removes them
+when the transaction ends. Use `clean` when the persistent settings and
+resources covered by its cleanup policy cannot otherwise be excluded.
 
 ## Standard Django settings not yet applied to native connections
 

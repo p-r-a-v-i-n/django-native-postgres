@@ -226,14 +226,7 @@ async fn get_or_create_pool(
         return Ok(pool.clone());
     }
 
-    let pool = postgres::create_pool(
-        &handle.database_url,
-        handle.max_size,
-        handle.wait_timeout_ms,
-        handle.ssl_mode,
-        handle.ssl_root_cert.as_deref(),
-        handle.time_zone.as_deref(),
-    )?;
+    let pool = postgres::create_pool(handle)?;
 
     // Closing can race with the first pool creation.
     if handle.is_closed() {
