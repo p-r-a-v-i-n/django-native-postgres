@@ -31,7 +31,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          toolchain: "1.99.1"
+          toolchain: "1.100.0"
           components: clippy, rustfmt
 
       - name: Install uv and Python
@@ -102,7 +102,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          toolchain: "1.99.1"
+          toolchain: "1.100.0"
 
       - name: Install uv and Python
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
@@ -135,7 +135,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          toolchain: "1.99.1"
+          toolchain: "1.100.0"
 
       - name: Install uv and Python
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
